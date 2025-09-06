@@ -1,7 +1,9 @@
 streamlit
 pandas
 transformers
+torch
 matplotlib
 plotly
 requests
+
 
