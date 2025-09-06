@@ -1,0 +1,91 @@
+:root {
+    --primary: #4a90e2;
+    --accent: #1f77b4;
+    --danger: #e74c3c;
+    --success: #2ecc71;
+    --warning: #f39c12;
+    --background: #f4f6f8;
+    --shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+}
+
+html, body {
+    background-color: var(--background);
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.header {
+    font-size: 2.8rem;
+    font-weight: 800;
+    color: var(--primary);
+    margin-bottom: 0.75rem;
+}
+
+.subheader {
+    font-size: 1.6rem;
+    color: var(--accent);
+    margin: 1.5rem 0 1rem 0;
+}
+
+.section {
+    background: #ffffff;
+    padding: 1.5rem 2rem;
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    margin-bottom: 2.2rem;
+    transition: all 0.3s ease;
+}
+
+.section:hover {
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+}
+
+.stButton > button {
+    background-color: var(--primary);
+    color: white;
+    border-radius: 10px;
+    padding: 0.6rem 1.2rem;
+    font-weight: bold;
+    font-size: 1.05rem;
+    border: none;
+    transition: background 0.3s ease, transform 0.2s ease;
+}
+
+.stButton > button:hover {
+    background-color: #357ABD;
+    transform: scale(1.04);
+}
+
+.stTextInput > div > div > input,
+.stSelectbox > div > div > div,
+.stTextArea > div > textarea {
+    border-radius: 10px !important;
+    padding: 0.55rem;
+    font-size: 1rem;
+    border: 1px solid #ccc;
+    transition: border 0.3s ease, box-shadow 0.3s ease;
+}
+
+.stTextInput > div > div > input:focus,
+.stTextArea > div > textarea:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 0.15rem rgba(74, 144, 226, 0.3);
+}
+
+.stDataFrame {
+    border-radius: 10px !important;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+}
+
+thead tr {
+    background-color: var(--primary) !important;
+    color: white !important;
+}
+
+tbody tr:nth-child(odd) {
+    background-color: #f7f9fc;
+}
+
+tbody tr:hover {
+    background-color: #e8f0fe;
+}
