@@ -481,11 +481,11 @@ def generate_qr_code():
     # Check if URL is already saved in session
     if 'app_base_url' not in st.session_state or not st.session_state.app_base_url:
         st.info("📱 **One-time Setup**: Enter your Streamlit Cloud app URL")
-        st.markdown("After deployment, your URL looks like: `https://your-app-name.streamlit.app`")
+        st.markdown("https://smartapp.streamlit.app/")
         
         manual_url = st.text_input(
             "Paste your app URL here (one-time setup):",
-            placeholder="https://your-app-name.streamlit.app",
+            placeholder="https://smartapp.streamlit.app/",
             key="manual_qr_url_input",
             help="This will be saved and used for all future QR codes"
         )
