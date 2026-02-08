@@ -5,5 +5,8 @@ torch
 matplotlib
 plotly
 requests
+qrcode[pil]
+Pillow
+
 
 
