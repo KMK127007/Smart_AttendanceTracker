@@ -333,6 +333,7 @@ for key, default in {
     "otp_store": {},
     "qr_code_active": False,  # NEW: Track if QR code is active
     "qr_code_data": None,     # NEW: Store QR code data
+    "qr_code_url": None,      # NEW: Store QR code URL
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -471,11 +472,35 @@ def save_attendance_new(df):
 
 def generate_qr_code():
     """Generate QR code that links to the QR student portal"""
-    # Get the current app URL - will work when deployed to Streamlit Cloud
-    qr_url = "?mode=qr_portal"  # Use query parameter to identify QR portal mode
+    # Admin must provide the deployed URL
+    st.markdown("#### Enter Your Streamlit App URL")
+    st.info("💡 After deploying to Streamlit Cloud, your app URL will look like: `https://your-app-name.streamlit.app`")
+    
+    deployed_url = st.text_input(
+        "Paste your deployed app URL here:",
+        placeholder="https://your-app-name.streamlit.app",
+        help="Copy your Streamlit Cloud app URL and paste it here. The QR code will direct students to: [YOUR_URL]/?mode=qr_portal",
+        key="qr_deployed_url_input"
+    )
+    
+    if not deployed_url:
+        st.warning("⚠️ Please enter your app URL to generate the QR code")
+        return None, None
+    
+    # Clean the URL and add the QR portal parameter
+    deployed_url = deployed_url.rstrip('/')
+    if not deployed_url.startswith('http'):
+        deployed_url = 'https://' + deployed_url
+    
+    qr_url = f"{deployed_url}/?mode=qr_portal"
     
     # Create QR code
-    qr = qrcode.QRCode(version=1, box_size=10, border=5)
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=10,
+        border=4,
+    )
     qr.add_data(qr_url)
     qr.make(fit=True)
     
@@ -491,9 +516,10 @@ def generate_qr_code():
     
     st.session_state.qr_code_active = True
     st.session_state.qr_code_data = img_base64
-    log_action("generate_qr_code", "QR Code generated for attendance")
+    st.session_state.qr_code_url = qr_url
+    log_action("generate_qr_code", f"QR Code generated for: {qr_url}")
     
-    return img_base64
+    return img_base64, qr_url
 
 def mark_attendance_qr(rollnumber, studentname, branch):
     """Mark attendance using QR code portal"""
@@ -827,18 +853,28 @@ def admin_panel():
     
     with col2:
         if st.button("🔲 Create New QR Code"):
-            qr_img = generate_qr_code()
-            st.success("QR Code generated successfully! ✅")
+            result = generate_qr_code()
+            if result[0] is not None:
+                st.success(f"✅ QR Code generated successfully!")
+            else:
+                st.warning("Please enter your app URL first")
     
     # Display QR code if active
     if st.session_state.qr_code_active and st.session_state.qr_code_data:
         st.markdown("### 📱 Active QR Code for Student Portal")
         st.markdown(f'<img src="data:image/png;base64,{st.session_state.qr_code_data}" width="300"/>', unsafe_allow_html=True)
-        st.info("Students can scan this QR code to access the simplified attendance portal.")
+        
+        # Show the URL the QR code points to
+        if 'qr_code_url' in st.session_state:
+            st.success(f"✅ **QR Code points to**: {st.session_state.qr_code_url}")
+        
+        st.info("📱 Students can scan this QR code to access the simplified attendance portal.")
         
         if st.button("Deactivate QR Code"):
             st.session_state.qr_code_active = False
             st.session_state.qr_code_data = None
+            if 'qr_code_url' in st.session_state:
+                del st.session_state.qr_code_url
             st.success("QR Code deactivated.")
             st.rerun()
 
