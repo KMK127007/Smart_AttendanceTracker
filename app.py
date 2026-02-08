@@ -334,7 +334,6 @@ for key, default in {
     "qr_code_active": False,  # NEW: Track if QR code is active
     "qr_code_data": None,     # NEW: Store QR code data
     "qr_code_url": None,      # NEW: Store QR code URL
-    "qr_portal_url": None,    # NEW: Store QR portal app URL (app1.py deployment)
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -472,40 +471,10 @@ def save_attendance_new(df):
     df.to_csv(ATTENDANCE_NEW_CSV, index=False)
 
 def generate_qr_code():
-    """Generate QR code that links to the separate QR student portal app"""
+    """Generate QR code that links directly to https://smartapp12.streamlit.app"""
     
-    # Check if QR portal URL is already saved in session
-    if 'qr_portal_url' not in st.session_state or not st.session_state.qr_portal_url:
-        st.info("📱 **One-time Setup**: Enter your QR Portal App URL (smartapp12)")
-        st.markdown("After deploying **app1.py as smartapp12**, paste its URL here")
-        st.markdown("Example: `https://smartapp12.streamlit.app`")
-        
-        portal_url = st.text_input(
-            "Paste your QR Portal app URL (smartapp12):",
-            placeholder="https://smartapp12.streamlit.app",
-            key="qr_portal_url_input",
-            help="This is the URL of your second deployed app (app1.py)"
-        )
-        
-        if portal_url:
-            portal_url = portal_url.rstrip('/')
-            if not portal_url.startswith('http'):
-                portal_url = 'https://' + portal_url
-            st.session_state.qr_portal_url = portal_url
-        else:
-            st.warning("⚠️ Please enter your QR Portal app URL to generate QR code")
-            return None, None
-    
-    # Use the saved QR portal URL
-    qr_url = st.session_state.qr_portal_url
-    
-    # Show current saved URL with option to change
-    with st.expander("ℹ️ QR Portal URL Settings"):
-        st.success(f"**QR Portal App URL**: {st.session_state.qr_portal_url}")
-        st.info(f"**QR Code will point to**: {qr_url}")
-        if st.button("🔄 Change QR Portal URL", key="change_qr_portal_url_btn"):
-            st.session_state.qr_portal_url = None
-            st.rerun()
+    # Hardcoded QR portal URL - no input needed!
+    qr_url = "https://smartapp12.streamlit.app"
     
     # Create QR code
     qr = qrcode.QRCode(
@@ -866,11 +835,9 @@ def admin_panel():
     
     with col2:
         if st.button("🔲 Create New QR Code"):
-            result = generate_qr_code()
-            if result[0] is not None:
-                st.success(f"✅ QR Code generated successfully!")
-            else:
-                st.warning("Please enter your app URL first")
+            qr_img, qr_url = generate_qr_code()
+            st.success(f"✅ QR Code generated successfully!")
+            st.info(f"**Scanning this QR will open:** {qr_url}")
     
     # Display QR code if active
     if st.session_state.qr_code_active and st.session_state.qr_code_data:
