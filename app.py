@@ -334,6 +334,7 @@ for key, default in {
     "qr_code_active": False,  # NEW: Track if QR code is active
     "qr_code_data": None,     # NEW: Store QR code data
     "qr_code_url": None,      # NEW: Store QR code URL
+    "app_base_url": None,     # NEW: Store app base URL for QR generation
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -472,27 +473,42 @@ def save_attendance_new(df):
 
 def generate_qr_code():
     """Generate QR code that links to the QR student portal"""
-    # Admin must provide the deployed URL
-    st.markdown("#### Enter Your Streamlit App URL")
-    st.info("💡 After deploying to Streamlit Cloud, your app URL will look like: `https://your-app-name.streamlit.app`")
     
-    deployed_url = st.text_input(
-        "Paste your deployed app URL here:",
-        placeholder="https://your-app-name.streamlit.app",
-        help="Copy your Streamlit Cloud app URL and paste it here. The QR code will direct students to: [YOUR_URL]/?mode=qr_portal",
-        key="qr_deployed_url_input"
-    )
+    # Use Streamlit's query params to construct the full URL
+    # When deployed, we can use a JavaScript component to get the URL
+    # For now, provide a one-time setup where admin enters URL and we save it
     
-    if not deployed_url:
-        st.warning("⚠️ Please enter your app URL to generate the QR code")
-        return None, None
+    # Check if URL is already saved in session
+    if 'app_base_url' not in st.session_state or not st.session_state.app_base_url:
+        st.info("📱 **One-time Setup**: Enter your Streamlit Cloud app URL")
+        st.markdown("After deployment, your URL looks like: `https://your-app-name.streamlit.app`")
+        
+        manual_url = st.text_input(
+            "Paste your app URL here (one-time setup):",
+            placeholder="https://your-app-name.streamlit.app",
+            key="manual_qr_url_input",
+            help="This will be saved and used for all future QR codes"
+        )
+        
+        if manual_url:
+            manual_url = manual_url.rstrip('/')
+            if not manual_url.startswith('http'):
+                manual_url = 'https://' + manual_url
+            st.session_state.app_base_url = manual_url
+        else:
+            st.warning("⚠️ Please enter your app URL to generate QR code")
+            return None, None
     
-    # Clean the URL and add the QR portal parameter
-    deployed_url = deployed_url.rstrip('/')
-    if not deployed_url.startswith('http'):
-        deployed_url = 'https://' + deployed_url
+    # Build QR URL using saved base URL
+    qr_url = f"{st.session_state.app_base_url}/?mode=qr_portal"
     
-    qr_url = f"{deployed_url}/?mode=qr_portal"
+    # Show current saved URL with option to change
+    with st.expander("ℹ️ Current App URL Settings"):
+        st.success(f"**Saved URL**: {st.session_state.app_base_url}")
+        st.info(f"**QR Code will point to**: {qr_url}")
+        if st.button("🔄 Change App URL", key="change_url_btn"):
+            st.session_state.app_base_url = None
+            st.rerun()
     
     # Create QR code
     qr = qrcode.QRCode(
