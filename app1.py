@@ -86,6 +86,19 @@ def mark_attendance_qr(rollnumber, studentname, branch):
     """Mark attendance using QR code portal"""
     students_new_df = load_students_new()
     
+    # Trim whitespace from input
+    rollnumber = rollnumber.strip()
+    studentname = studentname.strip()
+    branch = branch.strip()
+    
+    # Trim whitespace from CSV data
+    students_new_df['rollnumber'] = students_new_df['rollnumber'].str.strip()
+    students_new_df['studentname'] = students_new_df['studentname'].str.strip()
+    students_new_df['branch'] = students_new_df['branch'].str.strip()
+    
+    # Debug: Show what we're searching for (can be removed later)
+    # st.info(f"Searching for: Roll={rollnumber.lower()}, Name={studentname.lower()}, Branch={branch.lower()}")
+    
     # Validate student exists in students_new.csv
     student_record = students_new_df[
         (students_new_df['rollnumber'].str.lower() == rollnumber.lower()) &
@@ -93,8 +106,22 @@ def mark_attendance_qr(rollnumber, studentname, branch):
         (students_new_df['branch'].str.lower() == branch.lower())
     ]
     
+    # Debug info if student not found
     if student_record.empty:
-        return False, "Student not found in the database. Please check your Roll Number, Name, and Branch."
+        # Check each field individually to help debug
+        roll_match = students_new_df[students_new_df['rollnumber'].str.lower() == rollnumber.lower()]
+        name_match = students_new_df[students_new_df['studentname'].str.lower() == studentname.lower()]
+        branch_match = students_new_df[students_new_df['branch'].str.lower() == branch.lower()]
+        
+        error_msg = "Student not found in the database. "
+        if roll_match.empty:
+            error_msg += f"Roll number '{rollnumber}' not found. "
+        if name_match.empty:
+            error_msg += f"Name '{studentname}' not found. "
+        if branch_match.empty:
+            error_msg += f"Branch '{branch}' not found. "
+        
+        return False, error_msg + "Please check your details carefully."
     
     # Check if already marked today
     attendance_new_df = load_attendance_new()
