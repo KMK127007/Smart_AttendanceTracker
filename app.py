@@ -471,10 +471,10 @@ def save_attendance_new(df):
     df.to_csv(ATTENDANCE_NEW_CSV, index=False)
 
 def generate_qr_code():
-    """Generate QR code that links directly to https://smartapp12.streamlit.app"""
+    """Generate QR code that links directly to https://smartapp12.streamlit.app with access token"""
     
-    # Hardcoded QR portal URL - no input needed!
-    qr_url = "https://smartapp12.streamlit.app"
+    # Hardcoded QR portal URL with access token
+    qr_url = "https://smartapp12.streamlit.app?access=qr_portal_2026"
     
     # Create QR code
     qr = qrcode.QRCode(
