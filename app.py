@@ -119,7 +119,7 @@ def log_action(action: str, details: str = ""):
 # ------------------------------
 # QR Code generation
 def generate_qr_code():
-    """Generate QR code with 20-second expiry token"""
+    """Generate QR code with 40-second expiry token"""
     current_timestamp = int(time.time())
     access_token = f"qr_{current_timestamp}"
     
@@ -201,7 +201,7 @@ def admin_panel():
         # Calculate time remaining
         current_time = int(time.time())
         time_elapsed = current_time - st.session_state.qr_generated_time
-        time_remaining = 20 - time_elapsed
+        time_remaining = 40 - time_elapsed
         
         if time_remaining > 0:
             col1, col2 = st.columns([2, 1])
@@ -210,7 +210,7 @@ def admin_panel():
             with col2:
                 st.metric("⏱️ Time Remaining", f"{time_remaining}s", delta=None)
                 st.success("✅ QR Code Active")
-                st.caption(f"Expires at: {datetime.fromtimestamp(st.session_state.qr_generated_time + 20).strftime('%H:%M:%S')}")
+                st.caption(f"Expires at: {datetime.fromtimestamp(st.session_state.qr_generated_time + 40).strftime('%H:%M:%S')}")
         else:
             st.error("❌ QR Code Expired")
             st.warning(f"Expired {abs(time_remaining)} seconds ago. Generate a new one.")
