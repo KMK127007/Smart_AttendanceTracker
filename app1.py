@@ -48,9 +48,9 @@ if "show_location_form" not in st.session_state:
     st.session_state.show_location_form = False
 
 # ------------------------------
-# Security: Check for valid access token with 10-second expiry
+# Security: Check for valid access token with 40-second expiry (students only)
 def check_qr_access():
-    """Check if user came via QR code with valid token (40-second window)"""
+    """Check if user came via QR code with valid token (40-second window for students)"""
     import time
     
     query_params = st.query_params
@@ -78,6 +78,8 @@ def check_qr_access():
     # Check if already granted in session
     if st.session_state.qr_access_granted:
         return True, None
+    
+    return False, "No valid QR code scanned"
     
     return False, "No valid QR code scanned"
 
@@ -558,7 +560,7 @@ def qr_student_portal():
         st.markdown("---")
         
         # Tabs for different admin functions
-        admin_tabs = st.tabs(["👥 Manage Students", "📊 View Attendance", "📱 Device Management"])
+        admin_tabs = st.tabs(["👥 Manage Students", "📊 View Attendance", "✍️ Manual Attendance", "📱 Device Management"])
         
         # TAB 1: Manage Students
         with admin_tabs[0]:
@@ -683,8 +685,112 @@ def qr_student_portal():
             else:
                 st.info("No attendance records yet.")
         
-        # TAB 3: Device Management
+        # TAB 3: Manual Attendance
         with admin_tabs[2]:
+            st.markdown("### ✍️ Mark Attendance Manually")
+            st.info("Use this to manually mark attendance for students who missed the QR scan.")
+            
+            students_df = load_students_new()
+            
+            if not students_df.empty:
+                # Option 1: Select from existing students
+                st.markdown("#### Select from Registered Students")
+                
+                # Create display list with roll + name
+                student_options = [""] + [
+                    f"{row['rollnumber']} - {row['studentname']} ({row['branch']})"
+                    for _, row in students_df.iterrows()
+                ]
+                
+                selected_student = st.selectbox(
+                    "Select Student:",
+                    student_options,
+                    key="manual_att_select"
+                )
+                
+                if selected_student:
+                    # Extract roll number from selection
+                    selected_roll = selected_student.split(" - ")[0]
+                    student_row = students_df[students_df['rollnumber'] == selected_roll].iloc[0]
+                    
+                    st.success(f"**Selected:** {student_row['studentname']} | Roll: {student_row['rollnumber']} | Branch: {student_row['branch']}")
+                    
+                    # Custom date option
+                    manual_date = st.date_input("Attendance Date", value=date.today(), key="manual_date")
+                    manual_time = st.time_input("Attendance Time", value=datetime.now().time(), key="manual_time")
+                    
+                    if st.button("✅ Mark Attendance", type="primary", key="manual_mark_btn"):
+                        attendance_df = load_attendance_new()
+                        date_str = manual_date.isoformat()
+                        
+                        # Check if already marked for that date
+                        already = attendance_df[
+                            (attendance_df['rollnumber'].str.lower() == selected_roll.lower()) &
+                            (attendance_df['datestamp'] == date_str)
+                        ]
+                        
+                        if not already.empty:
+                            st.warning(f"⚠️ Attendance already marked for {student_row['studentname']} on {date_str}!")
+                        else:
+                            new_entry = pd.DataFrame([{
+                                "rollnumber": student_row['rollnumber'],
+                                "studentname": student_row['studentname'],
+                                "timestamp": manual_time.strftime("%H:%M:%S"),
+                                "datestamp": date_str
+                            }])
+                            attendance_df = pd.concat([attendance_df, new_entry], ignore_index=True)
+                            attendance_df.to_csv(ATTENDANCE_NEW_CSV, index=False)
+                            st.success(f"✅ Attendance marked manually for **{student_row['studentname']}** on {date_str}!")
+                            st.rerun()
+                
+                st.markdown("---")
+                
+                # Option 2: Bulk manual entry
+                st.markdown("#### Bulk Mark Absent Students as Present")
+                st.warning("⚠️ This will mark ALL unmarked students as present for today.")
+                
+                today_str = date.today().isoformat()
+                attendance_df = load_attendance_new()
+                today_att = attendance_df[attendance_df['datestamp'] == today_str]
+                already_marked_rolls = today_att['rollnumber'].str.lower().tolist()
+                
+                # Students NOT yet marked today
+                absent_students = students_df[
+                    ~students_df['rollnumber'].str.lower().isin(already_marked_rolls)
+                ]
+                
+                if not absent_students.empty:
+                    st.info(f"**{len(absent_students)} students** have not marked attendance today:")
+                    st.dataframe(absent_students, width=800)
+                    
+                    selected_absents = st.multiselect(
+                        "Select students to mark present:",
+                        [f"{row['rollnumber']} - {row['studentname']}" for _, row in absent_students.iterrows()],
+                        key="bulk_manual_select"
+                    )
+                    
+                    if selected_absents and st.button("✅ Mark Selected as Present", key="bulk_mark_btn"):
+                        for student_str in selected_absents:
+                            roll = student_str.split(" - ")[0]
+                            student_row = students_df[students_df['rollnumber'] == roll].iloc[0]
+                            new_entry = pd.DataFrame([{
+                                "rollnumber": student_row['rollnumber'],
+                                "studentname": student_row['studentname'],
+                                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                                "datestamp": today_str
+                            }])
+                            attendance_df = pd.concat([attendance_df, new_entry], ignore_index=True)
+                        
+                        attendance_df.to_csv(ATTENDANCE_NEW_CSV, index=False)
+                        st.success(f"✅ Attendance marked for {len(selected_absents)} students!")
+                        st.rerun()
+                else:
+                    st.success("✅ All students have marked attendance today!")
+            else:
+                st.info("No students registered yet. Add students in the 'Manage Students' tab first.")
+        
+        # TAB 4: Device Management
+        with admin_tabs[3]:
             st.markdown("### 📱 Device Binding Management")
             st.info(f"**Security Settings:**\n- College Location: ({COLLEGE_LATITUDE}, {COLLEGE_LONGITUDE})\n- Allowed Radius: {ALLOWED_RADIUS_METERS} meters\n- One device per student policy: Enabled")
             
@@ -724,58 +830,86 @@ def main():
         layout="centered"
     )
     
-    # Check if user has valid QR access (10-second window)
+    # -----------------------------------------------
+    # ADMIN PATH: bypasses QR check entirely - no time limit
+    # Admin can access anytime, forever
+    # -----------------------------------------------
+    if st.session_state.admin_logged_app1:
+        qr_student_portal()
+        return
+    
+    # -----------------------------------------------
+    # Check if admin login is present on blocked page
+    # Always show admin login option
+    # -----------------------------------------------
+    
+    # -----------------------------------------------
+    # STUDENT PATH: must scan valid QR within 40 seconds
+    # -----------------------------------------------
     access_valid, error_msg = check_qr_access()
     
     if not access_valid:
         st.error("🔒 **Access Denied**")
         if error_msg:
             st.warning(f"**Reason:** {error_msg}")
-        st.info("📱 **How to access:**\n\n1. Ask your administrator to generate a NEW QR code\n2. Scan it immediately (valid for 10 seconds only)\n3. QR codes expire quickly for security!")
-        st.stop()
-    
-    # QR access is valid - now check location
-    st.success("✅ QR Code verified!")
-    
-    # Location verification section
-    if not st.session_state.location_verified:
-        st.markdown("### 📍 Location Verification Required")
-        st.info("Please allow location access to mark attendance. This ensures you are at the college premises.")
+        st.info("📱 **How to access:**\n\n1. Ask your administrator to generate a NEW QR code\n2. Scan it immediately (valid for 40 seconds only)\n3. QR codes expire quickly for security!")
         
-        # Get user location using Streamlit's experimental feature
-        if st.button("📍 Allow Location Access", type="primary", key="allow_location"):
-            # For now, we'll use a simpler approach with user confirmation
-            # In production, you'd use JavaScript geolocation API
-            st.session_state.show_location_form = True
-        
-        if "show_location_form" in st.session_state and st.session_state.show_location_form:
-            st.markdown("---")
-            st.warning("⚠️ **For Testing:** Enter your current location or click 'Auto-Detect'")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                user_lat = st.number_input("Latitude", value=17.3850, format="%.6f", key="user_lat_input")
-            with col2:
-                user_lon = st.number_input("Longitude", value=78.4867, format="%.6f", key="user_lon_input")
-            
-            if st.button("Verify Location", type="primary"):
-                in_range, distance = check_location_in_range(user_lat, user_lon)
-                
-                if in_range:
-                    st.session_state.location_verified = True
-                    st.success(f"✅ Location verified! You are {distance*1000:.0f} meters from college.")
-                    st.balloons()
+        # Admin login always accessible - no time restriction
+        st.markdown("---")
+        st.markdown("### 🔐 Admin Access")
+        with st.expander("🔑 Admin Login (No time restriction)"):
+            admin_username = st.text_input("Admin Username", key="blocked_admin_user")
+            admin_password = st.text_input("Admin Password", type="password", key="blocked_admin_pass")
+            if st.button("Login as Admin", key="blocked_admin_login_btn"):
+                if admin_username in ADMINS and ADMINS[admin_username]["password"] == admin_password:
+                    st.session_state.admin_logged_app1 = True
+                    st.session_state.qr_access_granted = True  # Grant full access
+                    st.success("✅ Admin logged in! Access granted permanently.")
                     st.rerun()
                 else:
-                    st.error(f"❌ You are too far from college! Distance: {distance:.2f} km")
-                    st.warning("You must be within 500 meters of college to mark attendance.")
-        
+                    st.error("❌ Invalid credentials")
         st.stop()
     
-    # Both QR and location verified - show the portal
-    st.success("✅ Location verified! You are at college premises.")
+    # QR access is valid for students - now check location
+    if not st.session_state.admin_logged_app1:
+        st.success("✅ QR Code verified!")
+        
+        # Location verification section
+        if not st.session_state.location_verified:
+            st.markdown("### 📍 Location Verification Required")
+            st.info("Please allow location access to mark attendance. This ensures you are at the college premises.")
+            
+            if st.button("📍 Allow Location Access", type="primary", key="allow_location"):
+                st.session_state.show_location_form = True
+            
+            if "show_location_form" in st.session_state and st.session_state.show_location_form:
+                st.markdown("---")
+                st.warning("⚠️ **For Testing:** Enter your current location or click 'Auto-Detect'")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    user_lat = st.number_input("Latitude", value=17.3850, format="%.6f", key="user_lat_input")
+                with col2:
+                    user_lon = st.number_input("Longitude", value=78.4867, format="%.6f", key="user_lon_input")
+                
+                if st.button("Verify Location", type="primary"):
+                    in_range, distance = check_location_in_range(user_lat, user_lon)
+                    
+                    if in_range:
+                        st.session_state.location_verified = True
+                        st.success(f"✅ Location verified! You are {distance*1000:.0f} meters from college.")
+                        st.balloons()
+                        st.rerun()
+                    else:
+                        st.error(f"❌ You are too far from college! Distance: {distance:.2f} km")
+                        st.warning("You must be within 500 meters of college to mark attendance.")
+            
+            st.stop()
+        
+        st.success("✅ Location verified! You are at college premises.")
+    
+    # Show portal (both admin and verified students land here)
     qr_student_portal()
 
 if __name__ == "__main__":
     main()
-
