@@ -50,7 +50,7 @@ if "show_location_form" not in st.session_state:
 # ------------------------------
 # Security: Check for valid access token with 10-second expiry
 def check_qr_access():
-    """Check if user came via QR code with valid token (20-second window)"""
+    """Check if user came via QR code with valid token (40-second window)"""
     import time
     
     query_params = st.query_params
@@ -66,12 +66,12 @@ def check_qr_access():
                 current_time = int(time.time())
                 time_elapsed = current_time - qr_timestamp
                 
-                # Check if within 20-second window
-                if time_elapsed <= 20:
+                # Check if within 40-second window
+                if time_elapsed <= 40:
                     st.session_state.qr_access_granted = True
                     return True, None
                 else:
-                    return False, f"QR Code expired! ({time_elapsed} seconds old, max 20 seconds allowed)"
+                    return False, f"QR Code expired! ({time_elapsed} seconds old, max 40 seconds allowed)"
             except:
                 return False, "Invalid QR code format"
     
@@ -778,3 +778,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
