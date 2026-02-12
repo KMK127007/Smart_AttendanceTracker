@@ -187,12 +187,12 @@ def admin_panel():
     
     # QR Code Generation Section
     st.markdown("### 📱 Generate QR Code")
-    st.info("⏱️ **QR codes expire in 20 seconds.** Generate a new one for each attendance session.")
+    st.info("⏱️ **QR codes expire in 40 seconds.** Generate a new one for each attendance session.")
     
     if st.button("🔲 Generate New QR Code", type="primary", key="gen_qr_btn"):
         qr_img, qr_url, timestamp = generate_qr_code()
         st.success("✅ QR Code generated successfully!")
-        st.info(f"**Valid for 20 seconds** | Generated at: {datetime.fromtimestamp(timestamp).strftime('%H:%M:%S')}")
+        st.info(f"**Valid for 40 seconds** | Generated at: {datetime.fromtimestamp(timestamp).strftime('%H:%M:%S')}")
     
     # Display active QR code
     if st.session_state.qr_code_active and st.session_state.qr_code_data:
@@ -385,7 +385,7 @@ def main():
         st.markdown('<div class="header">🎯 Smart QR Attendance System</div>', unsafe_allow_html=True)
         st.markdown("""
         ### Features:
-        - ✅ **20-second QR expiry** - Secure, time-limited access
+        - ✅ **40-second QR expiry** - Secure, time-limited access
         - ✅ **Location verification** - Students must be at college
         - ✅ **Device binding** - One device per student
         - ✅ **Real-time tracking** - Instant attendance records
@@ -396,3 +396,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
