@@ -123,7 +123,7 @@ def generate_qr_code():
     current_timestamp = int(time.time())
     access_token = f"qr_{current_timestamp}"
     
-    # QR URL with timestamp token
+    # QR URL with timestamp token - expires in 40 seconds
     qr_url = f"https://smartapp12.streamlit.app?access={access_token}"
     
     # Create QR code
@@ -192,7 +192,7 @@ def admin_panel():
     if st.button("🔲 Generate New QR Code", type="primary", key="gen_qr_btn"):
         qr_img, qr_url, timestamp = generate_qr_code()
         st.success("✅ QR Code generated successfully!")
-        st.info(f"**Valid for 40 seconds** | Generated at: {datetime.fromtimestamp(timestamp).strftime('%H:%M:%S')}")
+        st.info(f"**Valid for 20 seconds** | Generated at: {datetime.fromtimestamp(timestamp).strftime('%H:%M:%S')}")
     
     # Display active QR code
     if st.session_state.qr_code_active and st.session_state.qr_code_data:
@@ -223,7 +223,7 @@ def admin_panel():
     st.markdown("---")
     
     # Tabs for management
-    tabs = st.tabs(["👥 Manage Students", "📊 View Attendance", "📱 Device Bindings", "📋 Activity Logs"])
+    tabs = st.tabs(["👥 Manage Students", "📊 View Attendance", "✍️ Manual Attendance", "📱 Device Bindings", "📋 Activity Logs"])
     
     # TAB 1: Manage Students
     with tabs[0]:
@@ -330,8 +330,102 @@ def admin_panel():
         else:
             st.info("No attendance records yet.")
     
-    # TAB 3: Device Bindings
+    # TAB 3: Manual Attendance
     with tabs[2]:
+        st.markdown("### ✍️ Mark Attendance Manually")
+        st.info("💡 Use this if a student missed the QR scan. Admin can manually mark attendance on their behalf.")
+        
+        students_df = load_students_new()
+        
+        if not students_df.empty:
+            # Option 1: Select from existing students
+            st.markdown("#### Option 1: Select from Student List")
+            selected_roll = st.selectbox(
+                "Select Student by Roll Number:",
+                [""] + students_df['rollnumber'].tolist(),
+                key="manual_select_roll"
+            )
+            
+            if selected_roll:
+                # Auto-fill name and branch
+                student_data = students_df[students_df['rollnumber'] == selected_roll].iloc[0]
+                st.success(f"**Student:** {student_data['studentname']} | **Branch:** {student_data['branch']}")
+                
+                manual_date = st.date_input("Date", value=date.today(), key="manual_date_select")
+                
+                if st.button("✅ Mark Attendance", key="manual_mark_btn", type="primary"):
+                    attendance_df = load_attendance_new()
+                    date_str = manual_date.isoformat()
+                    
+                    # Check if already marked
+                    already = attendance_df[
+                        (attendance_df['rollnumber'].str.lower() == selected_roll.lower()) &
+                        (attendance_df['datestamp'] == date_str)
+                    ]
+                    
+                    if not already.empty:
+                        st.warning(f"⚠️ Attendance already marked for {selected_roll} on {date_str}")
+                    else:
+                        new_entry = pd.DataFrame([{
+                            'rollnumber': selected_roll,
+                            'studentname': student_data['studentname'],
+                            'timestamp': datetime.now().strftime("%H:%M:%S"),
+                            'datestamp': date_str
+                        }])
+                        attendance_df = pd.concat([attendance_df, new_entry], ignore_index=True)
+                        attendance_df.to_csv(ATTENDANCE_NEW_CSV, index=False)
+                        st.success(f"✅ Attendance marked for **{student_data['studentname']}** on **{date_str}**!")
+                        log_action("manual_attendance", f"{selected_roll} - {date_str}")
+                        st.rerun()
+            
+            st.markdown("---")
+            
+            # Option 2: Manual entry (for students not in list)
+            st.markdown("#### Option 2: Enter Details Manually")
+            st.warning("⚠️ Use this only if the student is not in the student list.")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                man_roll = st.text_input("Roll Number", key="man_roll_input")
+            with col2:
+                man_name = st.text_input("Student Name", key="man_name_input")
+            with col3:
+                man_branch = st.text_input("Branch", key="man_branch_input")
+            
+            man_date = st.date_input("Date", value=date.today(), key="man_date_input")
+            
+            if st.button("✅ Mark Attendance Manually", key="man_mark_btn"):
+                if man_roll and man_name and man_branch:
+                    attendance_df = load_attendance_new()
+                    date_str = man_date.isoformat()
+                    
+                    # Check if already marked
+                    already = attendance_df[
+                        (attendance_df['rollnumber'].str.lower() == man_roll.lower()) &
+                        (attendance_df['datestamp'] == date_str)
+                    ]
+                    
+                    if not already.empty:
+                        st.warning(f"⚠️ Attendance already marked for {man_roll} on {date_str}")
+                    else:
+                        new_entry = pd.DataFrame([{
+                            'rollnumber': man_roll.strip(),
+                            'studentname': man_name.strip(),
+                            'timestamp': datetime.now().strftime("%H:%M:%S"),
+                            'datestamp': date_str
+                        }])
+                        attendance_df = pd.concat([attendance_df, new_entry], ignore_index=True)
+                        attendance_df.to_csv(ATTENDANCE_NEW_CSV, index=False)
+                        st.success(f"✅ Attendance marked for **{man_name}** on **{date_str}**!")
+                        log_action("manual_attendance_custom", f"{man_roll} - {date_str}")
+                        st.rerun()
+                else:
+                    st.warning("⚠️ Please fill all fields")
+        else:
+            st.info("No students in the list. Please add students first in 'Manage Students' tab.")
+    
+    # TAB 4: Device Bindings
+    with tabs[3]:
         st.markdown("### 📱 Device Bindings")
         st.info("Each student can only mark attendance from one registered device.")
         
@@ -353,8 +447,8 @@ def admin_panel():
         else:
             st.info("No devices bound yet.")
     
-    # TAB 4: Activity Logs
-    with tabs[3]:
+    # TAB 5: Activity Logs
+    with tabs[4]:
         st.markdown("### 📋 Recent Activity")
         
         if Path(LOG_CSV).exists():
@@ -385,7 +479,7 @@ def main():
         st.markdown('<div class="header">🎯 Smart QR Attendance System</div>', unsafe_allow_html=True)
         st.markdown("""
         ### Features:
-        - ✅ **40-second QR expiry** - Secure, time-limited access
+        - ✅ **20-second QR expiry** - Secure, time-limited access
         - ✅ **Location verification** - Students must be at college
         - ✅ **Device binding** - One device per student
         - ✅ **Real-time tracking** - Instant attendance records
@@ -396,4 +490,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
