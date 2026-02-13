@@ -35,8 +35,8 @@ supabase = get_supabase_client()
 
 # ------------------------------
 # College location settings
-COLLEGE_LATITUDE = 17.4553223   # SNIST
-COLLEGE_LONGITUDE = 78.6664965  # SNIST
+COLLEGE_LATITUDE = 17.4553223
+COLLEGE_LONGITUDE = 78.6664965
 ALLOWED_RADIUS_METERS = 500
 
 # ------------------------------
@@ -364,3 +364,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
