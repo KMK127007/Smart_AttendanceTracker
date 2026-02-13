@@ -35,8 +35,8 @@ supabase = get_supabase_client()
 
 # ------------------------------
 # College location settings
-COLLEGE_LATITUDE = 17.4553223
-COLLEGE_LONGITUDE = 78.6664965
+COLLEGE_LATITUDE = 17.4553223   # SNIST
+COLLEGE_LONGITUDE = 78.6664965  # SNIST
 ALLOWED_RADIUS_METERS = 500
 
 # ------------------------------
