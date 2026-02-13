@@ -282,9 +282,45 @@ def qr_student_portal():
                 st.rerun()
 
         st.markdown("---")
-        admin_tabs = st.tabs(["📊 Today's Attendance", "📋 All Records"])
+        admin_tabs = st.tabs(["📂 Upload Students CSV", "📊 Today's Attendance", "📋 All Records"])
 
         with admin_tabs[0]:
+            st.markdown("### 📂 Upload Students CSV")
+            st.info("Upload your students CSV here. Only the **rollnumber** column is used for validation.")
+
+            uploaded_file = st.file_uploader("Upload Students CSV", type=["csv"], key="admin_csv_upload")
+            if uploaded_file is not None:
+                try:
+                    df_uploaded = pd.read_csv(uploaded_file)
+                    # Auto-detect rollnumber column
+                    roll_col = None
+                    for col in df_uploaded.columns:
+                        if 'roll' in col.lower():
+                            roll_col = col
+                            break
+
+                    if roll_col is None:
+                        st.error("❌ No rollnumber column found! Make sure your CSV has a rollnumber column.")
+                    else:
+                        if roll_col != 'rollnumber':
+                            df_uploaded = df_uploaded.rename(columns={roll_col: 'rollnumber'})
+                        df_uploaded.to_csv(STUDENTS_NEW_CSV, index=False)
+                        st.success(f"✅ Uploaded! **{len(df_uploaded)}** student records saved.")
+                        st.dataframe(df_uploaded[['rollnumber']].head(10), width=400)
+                        st.caption(f"Showing first 10 of {len(df_uploaded)} records")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+            # Show current
+            current = load_students()
+            if not current.empty and 'rollnumber' in current.columns:
+                st.markdown("---")
+                st.success(f"📋 **Current database:** {len(current)} students")
+                st.dataframe(current[['rollnumber']], width=400)
+            else:
+                st.warning("No students loaded yet.")
+
+        with admin_tabs[1]:
             today = date.today().isoformat()
             att_df = load_attendance()
             today_df = att_df[att_df['datestamp'] == today] if not att_df.empty else pd.DataFrame()
@@ -297,7 +333,7 @@ def qr_student_portal():
             else:
                 st.info("No attendance today yet.")
 
-        with admin_tabs[1]:
+        with admin_tabs[2]:
             att_df = load_attendance()
             if not att_df.empty:
                 st.dataframe(att_df, width=800)
