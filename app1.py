@@ -13,6 +13,23 @@ warnings.filterwarnings('ignore')
 os.environ["PYTHONWARNINGS"] = "ignore"
 
 # ------------------------------
+# IST Timezone helpers
+from datetime import timezone, timedelta
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def ist_now():
+    return datetime.now(IST)
+
+def ist_time_str():
+    return ist_now().strftime("%H:%M:%S")
+
+def ist_date_str():
+    return ist_now().strftime("%d-%m-%Y")
+
+def ist_datetime_str():
+    return ist_now().strftime("%d-%m-%Y %H:%M:%S")
+
+# ------------------------------
 # Load secrets
 try:
     ADMIN_USERNAME = st.secrets["admin_user"]["username"]
@@ -116,7 +133,7 @@ def check_device_binding(rollnumber):
         new_binding = pd.DataFrame([{
             'rollnumber': rollnumber.lower(),
             'device_id': device_id,
-            'bound_at': datetime.now().isoformat()
+            'bound_at': ist_datetime_str()
         }])
         device_df = pd.concat([device_df, new_binding], ignore_index=True)
         save_device_binding(device_df)
@@ -187,7 +204,7 @@ def mark_attendance(rollnumber):
 
     # Check already marked today
     attendance_df = load_attendance()
-    today = date.today().isoformat()
+    today = ist_date_str()
 
     if not attendance_df.empty:
         already = attendance_df[
@@ -200,7 +217,7 @@ def mark_attendance(rollnumber):
     # Save attendance
     new_entry = pd.DataFrame([{
         'rollnumber': rollnumber.strip(),
-        'timestamp': datetime.now().strftime("%H:%M:%S"),
+        'timestamp': ist_time_str(),
         'datestamp': today
     }])
     attendance_df = pd.concat([attendance_df, new_entry], ignore_index=True)
@@ -247,7 +264,7 @@ def qr_student_portal():
                 if success:
                     st.success(message)
                     st.balloons()
-                    st.info(f"**Roll Number:** {rollnumber.strip()} | **Time:** {datetime.now().strftime('%H:%M:%S')} | **Date:** {date.today().isoformat()}")
+                    st.info(f"**Roll Number:** {rollnumber.strip()} | **Time:** {ist_time_str()} | **Date:** {ist_date_str()}")
                 else:
                     st.error(message)
             else:
@@ -321,7 +338,7 @@ def qr_student_portal():
                 st.warning("No students loaded yet.")
 
         with admin_tabs[1]:
-            today = date.today().isoformat()
+            today = ist_date_str()
             att_df = load_attendance()
             today_df = att_df[att_df['datestamp'] == today] if not att_df.empty else pd.DataFrame()
 
