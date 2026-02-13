@@ -348,23 +348,13 @@ def admin_panel():
                     st.success("📍 Location: ON")
                 else:
                     st.info("📍 Location: OFF")
-                st.caption("QR refreshes every 30s\nauto-updates on click")
+                st.caption("QR auto-refreshes every 30s ✅")
 
-            # Manual refresh button (no full page restart)
-            if st.button("🔄 Refresh QR Now", key="manual_refresh_btn"):
-                new_token = f"qr_{int(time.time())}"
-                st.session_state.qr_current_token = new_token
-                st.session_state.qr_current_image = generate_single_qr(new_token)
-                st.session_state.qr_last_refresh = int(time.time())
-                st.rerun()
+            # Fully automatic - no button needed
+            # Rerun every 1 second to update countdown and refresh QR when needed
+            time.sleep(1)
+            st.rerun()
 
-            # Use st.rerun with fragment approach - rerun only when needed
-            # This keeps session alive but updates timers
-            time.sleep(0.1)
-            if st.session_state.qr_active:
-                time_check = int(time.time()) - st.session_state.qr_last_refresh
-                if time_check >= 30:
-                    st.rerun()
 
     # ─────────────────────────────────────────────
     # TAB 2: Manage Students
