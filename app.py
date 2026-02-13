@@ -195,41 +195,15 @@ def admin_panel():
     with tabs[0]:
         st.markdown("### 📱 QR Code Generator")
 
-        # STEP 1: Upload Students CSV
-        st.markdown("#### 📂 Step 1: Upload Students CSV")
-        st.info("Upload your `students_new.csv` file. It must contain a **rollnumber** column.")
+        # STEP 1: Students check
+        st.markdown("#### 📂 Step 1: Verify Students Database")
 
-        uploaded_file = st.file_uploader("Upload Students CSV", type=["csv"], key="students_uploader")
-        if uploaded_file is not None:
-            try:
-                df_uploaded = pd.read_csv(uploaded_file)
-                # Auto-detect rollnumber column
-                roll_col = None
-                for col in df_uploaded.columns:
-                    if 'roll' in col.lower():
-                        roll_col = col
-                        break
-
-                if roll_col is None:
-                    st.error("❌ No 'rollnumber' column found! Please make sure your CSV has a rollnumber column.")
-                else:
-                    if roll_col != 'rollnumber':
-                        df_uploaded = df_uploaded.rename(columns={roll_col: 'rollnumber'})
-                    df_uploaded.to_csv(STUDENTS_NEW_CSV, index=False)
-                    st.session_state.students_uploaded = True
-                    st.success(f"✅ CSV uploaded! Found **{len(df_uploaded)}** student records.")
-                    st.dataframe(df_uploaded[['rollnumber']].head(5), width=400)
-                    st.caption(f"Showing first 5 of {len(df_uploaded)} records")
-            except Exception as e:
-                st.error(f"Error reading CSV: {e}")
-
-        # Show current students count
         current_students = load_students()
         if not current_students.empty and 'rollnumber' in current_students.columns:
-            st.success(f"📋 **Current database:** {len(current_students)} students loaded")
-            st.session_state.students_uploaded = True
+            st.success(f"✅ **{len(current_students)} students** loaded in smartapp12 database")
+            st.caption("Students are managed in smartapp12 → Upload CSV tab")
         else:
-            st.warning("⚠️ No students loaded yet. Please upload CSV first.")
+            st.warning("⚠️ No students loaded yet in smartapp12. Ask admin to upload CSV in smartapp12 first.")
 
         st.markdown("---")
 
@@ -277,37 +251,42 @@ def admin_panel():
         # STEP 3: Generate QR
         st.markdown("#### 🔲 Step 3: Generate QR Code")
 
-        if not st.session_state.students_uploaded and current_students.empty:
-            st.warning("⚠️ Please upload students CSV first (Step 1)")
+        if not current_students.empty and 'rollnumber' in current_students.columns:
+            can_generate = True
         else:
-            col1, col2 = st.columns([1, 1])
-            with col1:
-                if st.button("🔲 Start QR Session", type="primary", key="start_qr_btn"):
-                    # Save settings for app1.py to read
-                    save_qr_settings(location_enabled, selected_seconds)
+            can_generate = False
 
-                    # Initialize QR session
-                    current_timestamp = int(time.time())
-                    token = f"qr_{current_timestamp}"
+        if not can_generate:
+            st.warning("⚠️ No students in smartapp12 database yet. Ask admin to upload CSV in smartapp12 first.")
 
-                    st.session_state.qr_active = True
-                    st.session_state.qr_start_time = current_timestamp
-                    st.session_state.qr_window_seconds = selected_seconds
-                    st.session_state.qr_location_enabled = location_enabled
-                    st.session_state.qr_current_token = token
-                    st.session_state.qr_current_image = generate_single_qr(token)
-                    st.session_state.qr_last_refresh = current_timestamp
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("🔲 Start QR Session", type="primary", key="start_qr_btn", disabled=not can_generate):
+                # Save settings for app1.py to read
+                save_qr_settings(location_enabled, selected_seconds)
 
-                    log_action("start_qr_session", f"Window: {selected_time}, Location: {location_enabled}")
+                # Initialize QR session
+                current_timestamp = int(time.time())
+                token = f"qr_{current_timestamp}"
+
+                st.session_state.qr_active = True
+                st.session_state.qr_start_time = current_timestamp
+                st.session_state.qr_window_seconds = selected_seconds
+                st.session_state.qr_location_enabled = location_enabled
+                st.session_state.qr_current_token = token
+                st.session_state.qr_current_image = generate_single_qr(token)
+                st.session_state.qr_last_refresh = current_timestamp
+
+                log_action("start_qr_session", f"Window: {selected_time}, Location: {location_enabled}")
+                st.rerun()
+
+        with col2:
+            if st.session_state.qr_active:
+                if st.button("⏹️ Stop QR Session", key="stop_qr_btn"):
+                    st.session_state.qr_active = False
+                    st.session_state.qr_current_image = None
+                    log_action("stop_qr_session", "")
                     st.rerun()
-
-            with col2:
-                if st.session_state.qr_active:
-                    if st.button("⏹️ Stop QR Session", key="stop_qr_btn"):
-                        st.session_state.qr_active = False
-                        st.session_state.qr_current_image = None
-                        log_action("stop_qr_session", "")
-                        st.rerun()
 
         # ── Active QR Display ──
         if st.session_state.qr_active:
@@ -321,7 +300,7 @@ def admin_panel():
                 st.session_state.qr_active = False
                 st.rerun()
 
-            # Check if QR needs refresh (every 30 seconds)
+            # Check if QR needs refresh (every 30 seconds) - WITHOUT full page restart
             time_since_refresh = current_time - st.session_state.qr_last_refresh
             if time_since_refresh >= 30:
                 new_token = f"qr_{current_time}"
@@ -337,7 +316,7 @@ def admin_panel():
             # Status bar
             mins_remaining = int(time_remaining_total // 60)
             secs_remaining = int(time_remaining_total % 60)
-            next_refresh_in = 30 - time_since_refresh
+            next_refresh_in = max(0, int(30 - time_since_refresh))
 
             col1, col2 = st.columns([2, 1])
             with col1:
@@ -348,17 +327,28 @@ def admin_panel():
                     )
             with col2:
                 st.metric("⏱️ Session Remaining", f"{mins_remaining}m {secs_remaining}s")
-                st.metric("🔄 Next QR Refresh", f"{int(next_refresh_in)}s")
+                st.metric("🔄 Next QR in", f"{next_refresh_in}s")
                 if st.session_state.qr_location_enabled:
                     st.success("📍 Location: ON")
                 else:
                     st.info("📍 Location: OFF")
-                st.caption(f"QR refreshes every 30s\nSession window: {selected_time}")
+                st.caption("QR refreshes every 30s\nauto-updates on click")
 
-            # Auto-refresh page every 10 seconds to update timers
-            st.markdown("""
-                <meta http-equiv="refresh" content="10">
-            """, unsafe_allow_html=True)
+            # Manual refresh button (no full page restart)
+            if st.button("🔄 Refresh QR Now", key="manual_refresh_btn"):
+                new_token = f"qr_{int(time.time())}"
+                st.session_state.qr_current_token = new_token
+                st.session_state.qr_current_image = generate_single_qr(new_token)
+                st.session_state.qr_last_refresh = int(time.time())
+                st.rerun()
+
+            # Use st.rerun with fragment approach - rerun only when needed
+            # This keeps session alive but updates timers
+            time.sleep(0.1)
+            if st.session_state.qr_active:
+                time_check = int(time.time()) - st.session_state.qr_last_refresh
+                if time_check >= 30:
+                    st.rerun()
 
     # ─────────────────────────────────────────────
     # TAB 2: Manage Students
