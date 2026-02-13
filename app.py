@@ -14,6 +14,23 @@ warnings.filterwarnings('ignore')
 os.environ["PYTHONWARNINGS"] = "ignore"
 
 # ------------------------------
+# IST Timezone helpers
+from datetime import timezone, timedelta
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def ist_now():
+    return datetime.now(IST)
+
+def ist_time_str():
+    return ist_now().strftime("%H:%M:%S")
+
+def ist_date_str():
+    return ist_now().strftime("%d-%m-%Y")
+
+def ist_datetime_str():
+    return ist_now().strftime("%d-%m-%Y %H:%M:%S")
+
+# ------------------------------
 # Load secrets
 try:
     ADMIN_USERNAME = st.secrets["admin_user"]["username"]
@@ -112,8 +129,7 @@ def save_device_binding(df):
     df.to_csv(DEVICE_BINDING_CSV, index=False)
 
 def log_action(action: str, details: str = ""):
-    now = datetime.now().isoformat()
-    row = {"timestamp": now, "action": action, "details": details}
+    row = {"timestamp": ist_datetime_str(), "action": action, "details": details}
     try:
         if Path(LOG_CSV).exists():
             log_df = pd.read_csv(LOG_CSV)
@@ -130,7 +146,7 @@ def save_qr_settings(location_enabled, window_seconds):
     settings = {
         "location_enabled": location_enabled,
         "window_seconds": window_seconds,
-        "updated_at": datetime.now().isoformat()
+        "updated_at": ist_datetime_str()
     }
     with open(QR_SETTINGS_FILE, "w") as f:
         json.dump(settings, f)
@@ -398,7 +414,7 @@ def admin_panel():
     with tabs[2]:
         st.markdown("### 📊 Attendance Records")
         attendance_df = load_attendance()
-        today = date.today().isoformat()
+        today = ist_date_str()
 
         today_df = attendance_df[attendance_df['datestamp'] == today] if not attendance_df.empty else pd.DataFrame()
 
@@ -437,7 +453,7 @@ def admin_panel():
             man_date = st.date_input("Date", value=date.today(), key="man_date")
 
             if sel_roll and st.button("✅ Mark Attendance", type="primary", key="man_btn"):
-                date_str = man_date.isoformat()
+                date_str = man_date.strftime("%d-%m-%Y")
                 already = attendance_df[
                     (attendance_df['rollnumber'].str.lower() == sel_roll.lower()) &
                     (attendance_df['datestamp'] == date_str)
@@ -448,7 +464,7 @@ def admin_panel():
                 else:
                     new_entry = pd.DataFrame([{
                         'rollnumber': sel_roll,
-                        'timestamp': datetime.now().strftime("%H:%M:%S"),
+                        'timestamp': ist_time_str(),
                         'datestamp': date_str
                     }])
                     attendance_df = pd.concat([attendance_df, new_entry], ignore_index=True)
@@ -464,7 +480,7 @@ def admin_panel():
 
             if st.button("✅ Mark Manually", key="m_btn"):
                 if m_roll:
-                    date_str = m_date.isoformat()
+                    date_str = m_date.strftime("%d-%m-%Y")
                     already = attendance_df[
                         (attendance_df['rollnumber'].str.lower() == m_roll.lower()) &
                         (attendance_df['datestamp'] == date_str)
@@ -475,7 +491,7 @@ def admin_panel():
                     else:
                         new_entry = pd.DataFrame([{
                             'rollnumber': m_roll.strip(),
-                            'timestamp': datetime.now().strftime("%H:%M:%S"),
+                            'timestamp': ist_time_str(),
                             'datestamp': date_str
                         }])
                         attendance_df = pd.concat([attendance_df, new_entry], ignore_index=True)
