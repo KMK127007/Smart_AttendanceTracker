@@ -6,11 +6,10 @@ import qrcode
 from io import BytesIO
 import base64
 import os
+import json
 from pathlib import Path
 import warnings
-from supabase import create_client, Client
 
-# Suppress warnings
 warnings.filterwarnings('ignore')
 os.environ["PYTHONWARNINGS"] = "ignore"
 
@@ -20,19 +19,9 @@ try:
     ADMIN_USERNAME = st.secrets["admin_user"]["username"]
     ADMIN_PASSWORD = st.secrets["admin_user"]["password"]
     ADMINS = {ADMIN_USERNAME: {"password": ADMIN_PASSWORD}}
-    SUPABASE_URL = st.secrets["supabase"]["url"]
-    SUPABASE_KEY = st.secrets["supabase"]["key"]
 except KeyError as e:
-    st.error(f"Missing secret: {e}. Please add to secrets.toml")
+    st.error(f"Missing secret: {e}")
     st.stop()
-
-# ------------------------------
-# Supabase client
-@st.cache_resource
-def get_supabase_client() -> Client:
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
-
-supabase = get_supabase_client()
 
 # ------------------------------
 # CSS
@@ -41,10 +30,10 @@ def local_css(file_name="style.css"):
         base = Path(__file__).parent
     except Exception:
         base = Path.cwd()
-    css_file_path = base / file_name
     try:
-        if css_file_path.exists():
-            with open(css_file_path, encoding="utf-8") as f:
+        css_path = base / file_name
+        if css_path.exists():
+            with open(css_path, encoding="utf-8") as f:
                 st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
     except Exception:
         pass
@@ -52,128 +41,105 @@ def local_css(file_name="style.css"):
 local_css()
 
 # ------------------------------
+# File paths
+STUDENTS_NEW_CSV = "students_new.csv"
+ATTENDANCE_NEW_CSV = "attendance_new.csv"
+DEVICE_BINDING_CSV = "device_binding.csv"
+LOG_CSV = "activity_log.csv"
+QR_SETTINGS_FILE = "qr_settings.json"
+
+# ------------------------------
 # Session state
 for key, default in {
     "admin_logged": False,
     "admin_user": None,
-    "qr_code_active": False,
-    "qr_code_data": None,
-    "qr_code_url": None,
-    "qr_generated_time": None,
+    "qr_active": False,
+    "qr_start_time": None,
+    "qr_window_seconds": 60,
+    "qr_location_enabled": False,
+    "qr_current_token": None,
+    "qr_current_image": None,
+    "qr_last_refresh": None,
+    "students_uploaded": False,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
 # ------------------------------
-# Supabase DB helpers
-
-def log_action(action: str, details: str = ""):
-    try:
-        supabase.table("activity_log").insert({
-            "timestamp": datetime.now().isoformat(),
-            "action": action,
-            "details": details
-        }).execute()
-    except Exception as e:
-        print(f"Log error: {e}")
-
+# CSV Helpers
 def load_students():
     try:
-        res = supabase.table("students_new").select("*").order("rollnumber").execute()
-        return pd.DataFrame(res.data) if res.data else pd.DataFrame(columns=["rollnumber", "studentname", "branch"])
+        df = pd.read_csv(STUDENTS_NEW_CSV)
+        if 'rollnumber' not in df.columns:
+            # Try to find a column that looks like rollnumber
+            for col in df.columns:
+                if 'roll' in col.lower():
+                    df = df.rename(columns={col: 'rollnumber'})
+                    break
+        return df
+    except FileNotFoundError:
+        return pd.DataFrame(columns=["rollnumber"])
     except Exception as e:
         st.error(f"Error loading students: {e}")
-        return pd.DataFrame(columns=["rollnumber", "studentname", "branch"])
+        return pd.DataFrame(columns=["rollnumber"])
 
-def add_student(rollnumber, studentname, branch):
-    try:
-        supabase.table("students_new").insert({
-            "rollnumber": rollnumber.strip(),
-            "studentname": studentname.strip(),
-            "branch": branch.strip()
-        }).execute()
-        return True, f"✅ Student '{studentname}' added!"
-    except Exception as e:
-        if "duplicate" in str(e).lower() or "unique" in str(e).lower():
-            return False, f"⚠️ Roll number '{rollnumber}' already exists!"
-        return False, f"Error: {e}"
-
-def delete_student(rollnumber):
-    try:
-        supabase.table("students_new").delete().eq("rollnumber", rollnumber).execute()
-        return True, f"✅ Removed '{rollnumber}'"
-    except Exception as e:
-        return False, f"Error: {e}"
+def save_students(df):
+    df.to_csv(STUDENTS_NEW_CSV, index=False)
 
 def load_attendance():
     try:
-        res = supabase.table("attendance_new").select("*").order("datestamp", desc=True).execute()
-        return pd.DataFrame(res.data) if res.data else pd.DataFrame(columns=["rollnumber", "studentname", "timestamp", "datestamp"])
-    except Exception as e:
-        st.error(f"Error loading attendance: {e}")
-        return pd.DataFrame(columns=["rollnumber", "studentname", "timestamp", "datestamp"])
+        df = pd.read_csv(ATTENDANCE_NEW_CSV)
+        expected = ["rollnumber", "timestamp", "datestamp"]
+        for col in expected:
+            if col not in df.columns:
+                df[col] = ""
+        return df[expected]
+    except FileNotFoundError:
+        df = pd.DataFrame(columns=["rollnumber", "timestamp", "datestamp"])
+        df.to_csv(ATTENDANCE_NEW_CSV, index=False)
+        return df
 
-def load_today_attendance():
+def load_device_binding():
     try:
-        today = date.today().isoformat()
-        res = supabase.table("attendance_new").select("*").eq("datestamp", today).execute()
-        return pd.DataFrame(res.data) if res.data else pd.DataFrame(columns=["rollnumber", "studentname", "timestamp", "datestamp"])
-    except Exception as e:
-        st.error(f"Error loading today's attendance: {e}")
-        return pd.DataFrame(columns=["rollnumber", "studentname", "timestamp", "datestamp"])
+        df = pd.read_csv(DEVICE_BINDING_CSV)
+        return df
+    except FileNotFoundError:
+        df = pd.DataFrame(columns=["rollnumber", "device_id", "bound_at"])
+        df.to_csv(DEVICE_BINDING_CSV, index=False)
+        return df
 
-def check_already_marked(rollnumber, date_str):
+def save_device_binding(df):
+    df.to_csv(DEVICE_BINDING_CSV, index=False)
+
+def log_action(action: str, details: str = ""):
+    now = datetime.now().isoformat()
+    row = {"timestamp": now, "action": action, "details": details}
     try:
-        res = supabase.table("attendance_new").select("*")\
-            .eq("rollnumber", rollnumber)\
-            .eq("datestamp", date_str).execute()
-        return len(res.data) > 0
+        if Path(LOG_CSV).exists():
+            log_df = pd.read_csv(LOG_CSV)
+            log_df = pd.concat([log_df, pd.DataFrame([row])], ignore_index=True)
+        else:
+            log_df = pd.DataFrame([row])
+        log_df.to_csv(LOG_CSV, index=False)
     except Exception:
-        return False
+        pass
 
-def mark_attendance_manual(rollnumber, studentname, date_str):
-    try:
-        if check_already_marked(rollnumber, date_str):
-            return False, f"⚠️ Attendance already marked for {rollnumber} on {date_str}"
-        supabase.table("attendance_new").insert({
-            "rollnumber": rollnumber,
-            "studentname": studentname,
-            "timestamp": datetime.now().strftime("%H:%M:%S"),
-            "datestamp": date_str
-        }).execute()
-        return True, f"✅ Attendance marked for {studentname} on {date_str}!"
-    except Exception as e:
-        return False, f"Error: {e}"
-
-def load_device_bindings():
-    try:
-        res = supabase.table("device_binding").select("*").execute()
-        return pd.DataFrame(res.data) if res.data else pd.DataFrame(columns=["rollnumber", "device_id", "bound_at"])
-    except Exception as e:
-        st.error(f"Error loading device bindings: {e}")
-        return pd.DataFrame(columns=["rollnumber", "device_id", "bound_at"])
-
-def unbind_device(rollnumber):
-    try:
-        supabase.table("device_binding").delete().eq("rollnumber", rollnumber).execute()
-        return True, f"✅ Device unbound for '{rollnumber}'"
-    except Exception as e:
-        return False, f"Error: {e}"
-
-def load_logs():
-    try:
-        res = supabase.table("activity_log").select("*").order("timestamp", desc=True).limit(100).execute()
-        return pd.DataFrame(res.data) if res.data else pd.DataFrame(columns=["timestamp", "action", "details"])
-    except Exception as e:
-        return pd.DataFrame(columns=["timestamp", "action", "details"])
+# ------------------------------
+# Save QR settings to file so app1.py can read them
+def save_qr_settings(location_enabled, window_seconds):
+    settings = {
+        "location_enabled": location_enabled,
+        "window_seconds": window_seconds,
+        "updated_at": datetime.now().isoformat()
+    }
+    with open(QR_SETTINGS_FILE, "w") as f:
+        json.dump(settings, f)
 
 # ------------------------------
 # QR Code generation
-def generate_qr_code():
-    """Generate QR code with 40-second expiry token"""
-    current_timestamp = int(time.time())
-    access_token = f"qr_{current_timestamp}"
-    qr_url = f"https://smartapp12.streamlit.app?access={access_token}"
+def generate_single_qr(token):
+    """Generate a single QR code image for given token"""
+    qr_url = f"https://smartapp12.streamlit.app?access={token}"
 
     qr = qrcode.QRCode(
         version=1,
@@ -188,15 +154,7 @@ def generate_qr_code():
     buffer = BytesIO()
     img.save(buffer, format="PNG")
     buffer.seek(0)
-    img_base64 = base64.b64encode(buffer.getvalue()).decode()
-
-    st.session_state.qr_code_active = True
-    st.session_state.qr_code_data = img_base64
-    st.session_state.qr_code_url = qr_url
-    st.session_state.qr_generated_time = current_timestamp
-    log_action("generate_qr_code", f"Timestamp: {current_timestamp}")
-
-    return img_base64, qr_url, current_timestamp
+    return base64.b64encode(buffer.getvalue()).decode()
 
 # ------------------------------
 # Admin login/logout
@@ -218,6 +176,7 @@ def admin_logout():
     if st.sidebar.button("🚪 Logout"):
         st.session_state.admin_logged = False
         st.session_state.admin_user = None
+        st.session_state.qr_active = False
         log_action("admin_logout", "")
         st.rerun()
 
@@ -228,203 +187,348 @@ def admin_panel():
     st.write(f"Logged in as: **{st.session_state.admin_user}**")
     st.markdown("---")
 
-    # QR Code Section
-    st.markdown("### 📱 Generate QR Code")
-    st.info("⏱️ **QR codes expire in 40 seconds.** Generate a new one for each attendance session.")
+    tabs = st.tabs(["📱 Generate QR", "👥 Manage Students", "📊 View Attendance", "✍️ Manual Attendance", "📱 Device Bindings", "📋 Logs"])
 
-    if st.button("🔲 Generate New QR Code", type="primary", key="gen_qr_btn"):
-        qr_img, qr_url, timestamp = generate_qr_code()
-        st.success("✅ QR Code generated!")
-        st.info(f"**Valid for 40 seconds** | Generated at: {datetime.fromtimestamp(timestamp).strftime('%H:%M:%S')}")
-
-    # Display active QR
-    if st.session_state.qr_code_active and st.session_state.qr_code_data:
-        st.markdown("### 📱 Active QR Code")
-        current_time = int(time.time())
-        time_elapsed = current_time - st.session_state.qr_generated_time
-        time_remaining = 40 - time_elapsed
-
-        if time_remaining > 0:
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                st.markdown(f'<img src="data:image/png;base64,{st.session_state.qr_code_data}" width="300"/>', unsafe_allow_html=True)
-            with col2:
-                st.metric("⏱️ Time Remaining", f"{time_remaining}s")
-                st.success("✅ Active")
-                st.caption(f"Expires at: {datetime.fromtimestamp(st.session_state.qr_generated_time + 40).strftime('%H:%M:%S')}")
-        else:
-            st.error("❌ QR Code Expired - Generate a new one")
-
-        if st.button("🗑️ Clear QR"):
-            st.session_state.qr_code_active = False
-            st.session_state.qr_code_data = None
-            st.rerun()
-
-    st.markdown("---")
-
-    # Tabs
-    tabs = st.tabs(["👥 Manage Students", "📊 View Attendance", "✍️ Manual Attendance", "📱 Device Bindings", "📋 Logs"])
-
-    # TAB 1: Manage Students
+    # ─────────────────────────────────────────────
+    # TAB 1: Generate QR
+    # ─────────────────────────────────────────────
     with tabs[0]:
-        st.markdown("### ➕ Add New Student")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            new_roll = st.text_input("Roll Number", key="new_roll")
-        with col2:
-            new_name = st.text_input("Student Name", key="new_name")
-        with col3:
-            new_branch = st.text_input("Branch", key="new_branch")
+        st.markdown("### 📱 QR Code Generator")
 
-        if st.button("➕ Add Student", key="add_btn"):
-            if new_roll and new_name and new_branch:
-                success, msg = add_student(new_roll, new_name, new_branch)
-                if success:
-                    st.success(msg)
-                    log_action("add_student", new_roll)
-                    st.rerun()
+        # STEP 1: Upload Students CSV
+        st.markdown("#### 📂 Step 1: Upload Students CSV")
+        st.info("Upload your `students_new.csv` file. It must contain a **rollnumber** column.")
+
+        uploaded_file = st.file_uploader("Upload Students CSV", type=["csv"], key="students_uploader")
+        if uploaded_file is not None:
+            try:
+                df_uploaded = pd.read_csv(uploaded_file)
+                # Auto-detect rollnumber column
+                roll_col = None
+                for col in df_uploaded.columns:
+                    if 'roll' in col.lower():
+                        roll_col = col
+                        break
+
+                if roll_col is None:
+                    st.error("❌ No 'rollnumber' column found! Please make sure your CSV has a rollnumber column.")
                 else:
-                    st.warning(msg)
-            else:
-                st.warning("⚠️ Fill all fields")
+                    if roll_col != 'rollnumber':
+                        df_uploaded = df_uploaded.rename(columns={roll_col: 'rollnumber'})
+                    df_uploaded.to_csv(STUDENTS_NEW_CSV, index=False)
+                    st.session_state.students_uploaded = True
+                    st.success(f"✅ CSV uploaded! Found **{len(df_uploaded)}** student records.")
+                    st.dataframe(df_uploaded[['rollnumber']].head(5), width=400)
+                    st.caption(f"Showing first 5 of {len(df_uploaded)} records")
+            except Exception as e:
+                st.error(f"Error reading CSV: {e}")
+
+        # Show current students count
+        current_students = load_students()
+        if not current_students.empty and 'rollnumber' in current_students.columns:
+            st.success(f"📋 **Current database:** {len(current_students)} students loaded")
+            st.session_state.students_uploaded = True
+        else:
+            st.warning("⚠️ No students loaded yet. Please upload CSV first.")
 
         st.markdown("---")
-        st.markdown("### 👥 All Students")
+
+        # STEP 2: QR Settings
+        st.markdown("#### ⚙️ Step 2: Configure QR Settings")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**⏱️ QR Time Window**")
+            time_options = {
+                "1 minute": 60,
+                "3 minutes": 180,
+                "5 minutes": 300,
+                "10 minutes": 600,
+                "15 minutes": 900,
+                "30 minutes": 1800,
+            }
+            selected_time = st.selectbox(
+                "How long should QR be active?",
+                options=list(time_options.keys()),
+                index=0,
+                key="time_window_select",
+                help="QR code will auto-refresh every 30 seconds within this window"
+            )
+            selected_seconds = time_options[selected_time]
+            st.caption(f"QR will refresh every 30 seconds for {selected_time}")
+
+        with col2:
+            st.markdown("**📍 Location Verification**")
+            location_enabled = st.toggle(
+                "Enable Location Check",
+                value=False,
+                key="location_toggle",
+                help="If enabled, students must be within 500m of SNIST to mark attendance"
+            )
+            if location_enabled:
+                st.success("📍 Location check **ENABLED**")
+                st.info("📌 College: SNIST\n\nLat: 17.4553223\nLon: 78.6664965\nRadius: 500m")
+            else:
+                st.info("📍 Location check **DISABLED**\nStudents can mark from anywhere")
+
+        st.markdown("---")
+
+        # STEP 3: Generate QR
+        st.markdown("#### 🔲 Step 3: Generate QR Code")
+
+        if not st.session_state.students_uploaded and current_students.empty:
+            st.warning("⚠️ Please upload students CSV first (Step 1)")
+        else:
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                if st.button("🔲 Start QR Session", type="primary", key="start_qr_btn"):
+                    # Save settings for app1.py to read
+                    save_qr_settings(location_enabled, selected_seconds)
+
+                    # Initialize QR session
+                    current_timestamp = int(time.time())
+                    token = f"qr_{current_timestamp}"
+
+                    st.session_state.qr_active = True
+                    st.session_state.qr_start_time = current_timestamp
+                    st.session_state.qr_window_seconds = selected_seconds
+                    st.session_state.qr_location_enabled = location_enabled
+                    st.session_state.qr_current_token = token
+                    st.session_state.qr_current_image = generate_single_qr(token)
+                    st.session_state.qr_last_refresh = current_timestamp
+
+                    log_action("start_qr_session", f"Window: {selected_time}, Location: {location_enabled}")
+                    st.rerun()
+
+            with col2:
+                if st.session_state.qr_active:
+                    if st.button("⏹️ Stop QR Session", key="stop_qr_btn"):
+                        st.session_state.qr_active = False
+                        st.session_state.qr_current_image = None
+                        log_action("stop_qr_session", "")
+                        st.rerun()
+
+        # ── Active QR Display ──
+        if st.session_state.qr_active:
+            current_time = int(time.time())
+            total_elapsed = current_time - st.session_state.qr_start_time
+            time_remaining_total = st.session_state.qr_window_seconds - total_elapsed
+
+            # Check if overall session expired
+            if time_remaining_total <= 0:
+                st.error("⏰ QR Session Expired! Start a new session.")
+                st.session_state.qr_active = False
+                st.rerun()
+
+            # Check if QR needs refresh (every 30 seconds)
+            time_since_refresh = current_time - st.session_state.qr_last_refresh
+            if time_since_refresh >= 30:
+                new_token = f"qr_{current_time}"
+                st.session_state.qr_current_token = new_token
+                st.session_state.qr_current_image = generate_single_qr(new_token)
+                st.session_state.qr_last_refresh = current_time
+                log_action("qr_refresh", f"New token at {current_time}")
+
+            # Display QR
+            st.markdown("---")
+            st.markdown("### 📱 Active QR Code")
+
+            # Status bar
+            mins_remaining = int(time_remaining_total // 60)
+            secs_remaining = int(time_remaining_total % 60)
+            next_refresh_in = 30 - time_since_refresh
+
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                if st.session_state.qr_current_image:
+                    st.markdown(
+                        f'<img src="data:image/png;base64,{st.session_state.qr_current_image}" width="280"/>',
+                        unsafe_allow_html=True
+                    )
+            with col2:
+                st.metric("⏱️ Session Remaining", f"{mins_remaining}m {secs_remaining}s")
+                st.metric("🔄 Next QR Refresh", f"{int(next_refresh_in)}s")
+                if st.session_state.qr_location_enabled:
+                    st.success("📍 Location: ON")
+                else:
+                    st.info("📍 Location: OFF")
+                st.caption(f"QR refreshes every 30s\nSession window: {selected_time}")
+
+            # Auto-refresh page every 10 seconds to update timers
+            st.markdown("""
+                <meta http-equiv="refresh" content="10">
+            """, unsafe_allow_html=True)
+
+    # ─────────────────────────────────────────────
+    # TAB 2: Manage Students
+    # ─────────────────────────────────────────────
+    with tabs[1]:
+        st.markdown("### 👥 Manage Students")
+
         students_df = load_students()
         if not students_df.empty:
-            display_cols = [c for c in ["rollnumber", "studentname", "branch"] if c in students_df.columns]
-            st.dataframe(students_df[display_cols], width=1000)
-            st.info(f"**Total:** {len(students_df)} students")
+            st.success(f"**Total Students:** {len(students_df)}")
+            st.dataframe(students_df, width=1000)
 
-            csv = students_df[display_cols].to_csv(index=False).encode('utf-8')
-            st.download_button("⬇️ Download List", csv, "students_new.csv", "text/csv", key="dl_students")
+            csv = students_df.to_csv(index=False).encode('utf-8')
+            st.download_button("⬇️ Download Students List", csv, "students_new.csv", "text/csv", key="dl_students")
+
+            st.markdown("---")
+            st.markdown("### ➕ Add Single Student")
+            new_roll = st.text_input("Roll Number", key="add_roll")
+            if st.button("➕ Add", key="add_single_btn"):
+                if new_roll:
+                    if new_roll.lower() in students_df['rollnumber'].str.lower().values:
+                        st.warning(f"⚠️ '{new_roll}' already exists!")
+                    else:
+                        new_row = pd.DataFrame([{'rollnumber': new_roll.strip()}])
+                        students_df = pd.concat([students_df, new_row], ignore_index=True)
+                        save_students(students_df)
+                        st.success(f"✅ Added '{new_roll}'")
+                        log_action("add_student", new_roll)
+                        st.rerun()
+                else:
+                    st.warning("Enter roll number")
 
             st.markdown("### 🗑️ Remove Student")
             to_del = st.selectbox("Select:", [""] + students_df['rollnumber'].tolist(), key="del_sel")
             if to_del and st.button("🗑️ Remove", key="del_btn"):
-                success, msg = delete_student(to_del)
-                if success:
-                    st.success(msg)
-                    log_action("delete_student", to_del)
-                    st.rerun()
-                else:
-                    st.error(msg)
+                students_df = students_df[students_df['rollnumber'] != to_del]
+                save_students(students_df)
+                st.success(f"✅ Removed '{to_del}'")
+                log_action("delete_student", to_del)
+                st.rerun()
         else:
-            st.info("No students yet.")
+            st.info("No students loaded. Upload CSV in 'Generate QR' tab.")
 
-    # TAB 2: View Attendance
-    with tabs[1]:
+    # ─────────────────────────────────────────────
+    # TAB 3: View Attendance
+    # ─────────────────────────────────────────────
+    with tabs[2]:
         st.markdown("### 📊 Attendance Records")
-        today_df = load_today_attendance()
+        attendance_df = load_attendance()
         today = date.today().isoformat()
 
-        if not today_df.empty:
-            st.success(f"📅 **Today ({today})**")
-            display_cols = [c for c in ["rollnumber", "studentname", "timestamp", "datestamp"] if c in today_df.columns]
-            st.dataframe(today_df[display_cols], width=1000)
-            st.info(f"**Present Today:** {len(today_df)}")
+        today_df = attendance_df[attendance_df['datestamp'] == today] if not attendance_df.empty else pd.DataFrame()
 
-            csv = today_df[display_cols].to_csv(index=False).encode('utf-8')
+        if not today_df.empty:
+            st.success(f"📅 **Today ({today}) - {len(today_df)} present**")
+            st.dataframe(today_df, width=1000)
+            csv = today_df.to_csv(index=False).encode('utf-8')
             st.download_button("⬇️ Download Today's", csv, f"attendance_{today}.csv", "text/csv", key="dl_today")
         else:
             st.info("No attendance today yet.")
 
         st.markdown("---")
-        all_df = load_attendance()
-        if not all_df.empty:
-            st.markdown("### 📋 All Records")
-            display_cols = [c for c in ["rollnumber", "studentname", "timestamp", "datestamp"] if c in all_df.columns]
-            st.dataframe(all_df[display_cols], width=1000)
-            st.info(f"**Total Records:** {len(all_df)}")
 
-            csv_all = all_df[display_cols].to_csv(index=False).encode('utf-8')
+        if not attendance_df.empty:
+            st.markdown("### 📋 All Records")
+            st.dataframe(attendance_df, width=1000)
+            st.info(f"**Total Records:** {len(attendance_df)}")
+            csv_all = attendance_df.to_csv(index=False).encode('utf-8')
             st.download_button("⬇️ Download All", csv_all, "attendance_all.csv", "text/csv", key="dl_all")
         else:
             st.info("No attendance records yet.")
 
-    # TAB 3: Manual Attendance
-    with tabs[2]:
+    # ─────────────────────────────────────────────
+    # TAB 4: Manual Attendance
+    # ─────────────────────────────────────────────
+    with tabs[3]:
         st.markdown("### ✍️ Mark Attendance Manually")
         st.info("💡 Use this if a student missed the QR scan.")
 
         students_df = load_students()
+        attendance_df = load_attendance()
 
-        if not students_df.empty:
-            st.markdown("#### Option 1: Select from Student List")
-            sel_roll = st.selectbox("Select Student:", [""] + students_df['rollnumber'].tolist(), key="man_sel")
+        if not students_df.empty and 'rollnumber' in students_df.columns:
+            st.markdown("#### Select Student")
+            sel_roll = st.selectbox("Select Roll Number:", [""] + students_df['rollnumber'].tolist(), key="man_sel")
+            man_date = st.date_input("Date", value=date.today(), key="man_date")
 
-            if sel_roll:
-                s = students_df[students_df['rollnumber'] == sel_roll].iloc[0]
-                st.success(f"**Name:** {s['studentname']} | **Branch:** {s['branch']}")
-                man_date = st.date_input("Date", value=date.today(), key="man_date1")
+            if sel_roll and st.button("✅ Mark Attendance", type="primary", key="man_btn"):
+                date_str = man_date.isoformat()
+                already = attendance_df[
+                    (attendance_df['rollnumber'].str.lower() == sel_roll.lower()) &
+                    (attendance_df['datestamp'] == date_str)
+                ] if not attendance_df.empty else pd.DataFrame()
 
-                if st.button("✅ Mark Attendance", key="man_btn1", type="primary"):
-                    success, msg = mark_attendance_manual(sel_roll, s['studentname'], man_date.isoformat())
-                    if success:
-                        st.success(msg)
-                        log_action("manual_attendance", f"{sel_roll} - {man_date.isoformat()}")
-                        st.rerun()
-                    else:
-                        st.warning(msg)
+                if not already.empty:
+                    st.warning(f"⚠️ Already marked for {sel_roll} on {date_str}")
+                else:
+                    new_entry = pd.DataFrame([{
+                        'rollnumber': sel_roll,
+                        'timestamp': datetime.now().strftime("%H:%M:%S"),
+                        'datestamp': date_str
+                    }])
+                    attendance_df = pd.concat([attendance_df, new_entry], ignore_index=True)
+                    attendance_df.to_csv(ATTENDANCE_NEW_CSV, index=False)
+                    st.success(f"✅ Attendance marked for **{sel_roll}** on **{date_str}**!")
+                    log_action("manual_attendance", f"{sel_roll} - {date_str}")
+                    st.rerun()
 
             st.markdown("---")
-            st.markdown("#### Option 2: Enter Details Manually")
-            st.warning("⚠️ Only if student is NOT in the list")
+            st.markdown("#### ➕ Manual Entry (Roll not in list)")
+            m_roll = st.text_input("Roll Number", key="m_roll")
+            m_date = st.date_input("Date", value=date.today(), key="m_date")
 
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                m_roll = st.text_input("Roll Number", key="m_roll")
-            with col2:
-                m_name = st.text_input("Student Name", key="m_name")
-            with col3:
-                m_branch = st.text_input("Branch", key="m_branch")
+            if st.button("✅ Mark Manually", key="m_btn"):
+                if m_roll:
+                    date_str = m_date.isoformat()
+                    already = attendance_df[
+                        (attendance_df['rollnumber'].str.lower() == m_roll.lower()) &
+                        (attendance_df['datestamp'] == date_str)
+                    ] if not attendance_df.empty else pd.DataFrame()
 
-            m_date = st.date_input("Date", value=date.today(), key="m_date2")
-
-            if st.button("✅ Mark Manually", key="man_btn2"):
-                if m_roll and m_name and m_branch:
-                    success, msg = mark_attendance_manual(m_roll, m_name, m_date.isoformat())
-                    if success:
-                        st.success(msg)
-                        log_action("manual_attendance_custom", f"{m_roll} - {m_date.isoformat()}")
-                        st.rerun()
+                    if not already.empty:
+                        st.warning(f"⚠️ Already marked for {m_roll} on {date_str}")
                     else:
-                        st.warning(msg)
+                        new_entry = pd.DataFrame([{
+                            'rollnumber': m_roll.strip(),
+                            'timestamp': datetime.now().strftime("%H:%M:%S"),
+                            'datestamp': date_str
+                        }])
+                        attendance_df = pd.concat([attendance_df, new_entry], ignore_index=True)
+                        attendance_df.to_csv(ATTENDANCE_NEW_CSV, index=False)
+                        st.success(f"✅ Marked for **{m_roll}** on **{date_str}**!")
+                        log_action("manual_attendance_custom", f"{m_roll} - {date_str}")
+                        st.rerun()
                 else:
-                    st.warning("⚠️ Fill all fields")
+                    st.warning("Enter roll number")
         else:
-            st.info("Add students first.")
+            st.info("No students loaded yet.")
 
-    # TAB 4: Device Bindings
-    with tabs[3]:
+    # ─────────────────────────────────────────────
+    # TAB 5: Device Bindings
+    # ─────────────────────────────────────────────
+    with tabs[4]:
         st.markdown("### 📱 Device Bindings")
-        st.info("One device per student only.")
-        device_df = load_device_bindings()
+        st.info("One device per student.")
+        device_df = load_device_binding()
 
         if not device_df.empty:
-            display_cols = [c for c in ["rollnumber", "device_id", "bound_at"] if c in device_df.columns]
-            st.dataframe(device_df[display_cols], width=1000)
+            st.dataframe(device_df, width=1000)
             st.info(f"**Bound Devices:** {len(device_df)}")
 
             st.markdown("### 🔓 Unbind Device")
             to_unbind = st.selectbox("Select:", [""] + device_df['rollnumber'].tolist(), key="unbind_sel")
             if to_unbind and st.button("🔓 Unbind", key="unbind_btn"):
-                success, msg = unbind_device(to_unbind)
-                if success:
-                    st.success(msg)
-                    log_action("unbind_device", to_unbind)
-                    st.rerun()
-                else:
-                    st.error(msg)
+                device_df = device_df[device_df['rollnumber'] != to_unbind]
+                save_device_binding(device_df)
+                st.success(f"✅ Unbound '{to_unbind}'")
+                log_action("unbind_device", to_unbind)
+                st.rerun()
         else:
             st.info("No devices bound yet.")
 
-    # TAB 5: Logs
-    with tabs[4]:
+    # ─────────────────────────────────────────────
+    # TAB 6: Logs
+    # ─────────────────────────────────────────────
+    with tabs[5]:
         st.markdown("### 📋 Activity Logs")
-        log_df = load_logs()
-        if not log_df.empty:
-            st.dataframe(log_df, width=1000)
+        if Path(LOG_CSV).exists():
+            log_df = pd.read_csv(LOG_CSV)
+            st.dataframe(log_df.tail(100).sort_values("timestamp", ascending=False), width=1000)
         else:
             st.info("No logs yet.")
 
@@ -446,11 +550,12 @@ def main():
         st.markdown('<div class="header">🎯 Smart QR Attendance System</div>', unsafe_allow_html=True)
         st.markdown("""
         ### Features:
-        - ✅ **Supabase Database** - Real-time, permanent storage
-        - ✅ **40-second QR expiry** - Secure time-limited access
-        - ✅ **Location verification** - Students must be at college
-        - ✅ **Device binding** - One device per student
-        - ✅ **Manual attendance** - Admin override option
+        - ✅ **Upload student CSV** before QR generation
+        - ✅ **Custom time window** - 1, 3, 5, 10, 15, 30 minutes
+        - ✅ **Auto-refreshing QR** every 30 seconds
+        - ✅ **Optional location check** (SNIST)
+        - ✅ **Single device per student**
+        - ✅ **Manual attendance** override
         
         **👈 Login from sidebar to get started!**
         """)
