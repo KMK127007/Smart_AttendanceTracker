@@ -143,8 +143,9 @@ def in_range(user_lat, user_lon):
     d = haversine(COLLEGE_LAT, COLLEGE_LON, user_lat, user_lon)
     return d <= RADIUS_M, d
 
-# ── QR Access check ───────────────────────────────────────
+# ── QR Access check + read company & location from URL ───
 def check_qr_access():
+    import urllib.parse
     params = st.query_params
     if "access" in params:
         token = params["access"]
@@ -154,11 +155,19 @@ def check_qr_access():
                 elapsed = int(time.time()) - ts
                 if elapsed <= 30:
                     st.session_state.qr_access_granted = True
-                    return True, None
-                return False, f"⏰ QR expired ({elapsed}s old). Ask admin for the latest QR."
-            except: return False, "Invalid QR format."
-    if st.session_state.qr_access_granted: return True, None
-    return False, "Please scan the QR code shown by your admin."
+                    # Read company and location directly from URL
+                    company = urllib.parse.unquote(params.get("company", "General"))
+                    loc_enabled = params.get("loc", "0") == "1"
+                    return True, None, company, loc_enabled
+                return False, f"⏰ QR expired ({elapsed}s old). Ask admin for the latest QR.", None, False
+            except: return False, "Invalid QR format.", None, False
+    if st.session_state.qr_access_granted:
+        # Already verified - read from URL still
+        import urllib.parse
+        company = urllib.parse.unquote(params.get("company", "General"))
+        loc_enabled = params.get("loc", "0") == "1"
+        return True, None, company, loc_enabled
+    return False, "Please scan the QR code shown by your admin.", None, False
 
 # ── Mark attendance ───────────────────────────────────────
 def mark_attendance(rollnumber, company):
@@ -365,14 +374,17 @@ def student_portal(company):
 def main():
     st.set_page_config(page_title="QR Attendance Portal", page_icon="📱", layout="centered")
 
+    import urllib.parse
+    params = st.query_params
+
     # Admin bypasses QR check entirely — stays forever
     if st.session_state.admin_logged_app1:
-        settings = load_qr_settings()
-        student_portal(settings.get("company", "General"))
+        company = urllib.parse.unquote(params.get("company", "")) or load_qr_settings().get("company", "General")
+        student_portal(company)
         return
 
     # Student path — must scan valid QR
-    valid, err = check_qr_access()
+    valid, err, company, loc_required = check_qr_access()
 
     if not valid:
         st.error("🔒 **Access Denied**")
@@ -389,11 +401,6 @@ def main():
                     st.success("✅ Logged in!"); st.rerun()
                 else: st.error("❌ Invalid credentials")
         st.stop()
-
-    # Load settings
-    settings = load_qr_settings()
-    company = settings.get("company", "General")
-    loc_required = settings.get("location_enabled", False)
 
     # Location check (only if admin enabled it in smartapp)
     if loc_required and not st.session_state.location_verified:
@@ -418,8 +425,10 @@ def main():
                     st.error(f"❌ {int(dist)}m away. Must be within {RADIUS_M}m of SNIST.")
         st.stop()
 
-    if loc_required: st.success("✅ QR & Location verified!")
-    else: st.success("✅ QR Code verified!")
+    if loc_required:
+        st.success("✅ QR & Location verified!")
+    else:
+        st.success("✅ QR Code verified!")
 
     student_portal(company)
 
