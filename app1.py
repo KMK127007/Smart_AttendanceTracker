@@ -417,13 +417,13 @@ def main():
     import urllib.parse
     params = st.query_params
 
-    # Admin bypasses QR check entirely — stays forever
+    # ── ADMIN PATH: no QR, no location, no time limit ──────
     if st.session_state.admin_logged_app1:
         company = st.session_state.current_company or urllib.parse.unquote(params.get("company", "General"))
         student_portal(company)
-        return
+        return  # ← exits here, never reaches location check below
 
-    # Student path — must scan valid QR
+    # ── STUDENT PATH: must scan valid QR ───────────────────
     valid, err = check_qr_access()
 
     if not valid:
@@ -438,15 +438,16 @@ def main():
                 if u in ADMINS and ADMINS[u]["password"] == p:
                     st.session_state.admin_logged_app1 = True
                     st.session_state.qr_access_granted = True
-                    st.success("✅ Logged in!"); st.rerun()
-                else: st.error("❌ Invalid credentials")
+                    st.success("✅ Logged in!")
+                    st.rerun()  # ← reruns → admin path above, skips location
+                else:
+                    st.error("❌ Invalid credentials")
         st.stop()
 
-    # Read from session state (set during QR validation)
+    # ── STUDENT: location check (only if admin enabled in smartapp) ──
     company = st.session_state.current_company
     loc_required = st.session_state.loc_required
 
-    # Location check (only if admin enabled it in smartapp)
     if loc_required and not st.session_state.location_verified:
         st.success("✅ QR verified!")
         st.info(f"🏢 **Company:** {company}")
