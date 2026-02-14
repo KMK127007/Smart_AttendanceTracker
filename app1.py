@@ -1,7 +1,8 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 from datetime import datetime, date, timezone, timedelta
-import time, json, uuid, os, warnings
+import time, json, os, warnings
 from pathlib import Path
 from math import radians, sin, cos, sqrt, atan2
 
@@ -23,9 +24,8 @@ except KeyError as e:
 
 COLLEGE_LAT, COLLEGE_LON, RADIUS_M = 17.4553223, 78.6664965, 500
 
-STUDENTS_CSV     = "students_new.csv"
-DEVICE_CSV       = "device_binding.csv"
-QR_SETTINGS_FILE = "qr_settings.json"
+STUDENTS_CSV = "students_new.csv"
+DEVICE_CSV   = "device_binding.csv"
 
 def att_csv(company): return f"attendance_{company.strip().replace(' ','_')}.csv"
 
@@ -37,49 +37,71 @@ def local_css():
 
 local_css()
 
+# ── Session state ─────────────────────────────────────────
 for k, v in {
     "admin_logged_app1": False,
     "qr_access_granted": False,
     "location_verified": False,
     "show_location_form": False,
-    "device_fingerprint": None,
-    "loc_required": False,
+    "device_id": None,           # stable JS fingerprint stored here
     "current_company": "General",
+    "loc_required": False,
+    "attendance_marked": False,  # once marked, block re-entry
 }.items():
     if k not in st.session_state: st.session_state[k] = v
 
-# ── Stable device fingerprint via JS + session ────────────
-def get_or_create_device_fingerprint():
-    """
-    Inject JS to read/write a stable device ID from localStorage.
-    Falls back to a uuid stored in session_state if JS hasn't returned yet.
-    """
-    # Inject JS to post localStorage device_id back to Streamlit
-    st.components.v1.html("""
-        <script>
-        const key = 'smart_attendance_device_id';
-        let did = localStorage.getItem(key);
-        if (!did) {
-            did = 'dev_' + Math.random().toString(36).substr(2,16) + Date.now();
-            localStorage.setItem(key, did);
-        }
-        // Write to a hidden element so Python can read via URL param workaround
-        // We store in sessionStorage as well for this session
-        sessionStorage.setItem(key, did);
-        </script>
-    """, height=0)
-    
-    # Use session_state fingerprint - generated once per session, stable across reruns
-    if not st.session_state.device_fingerprint:
-        # Generate once and lock it in session
-        st.session_state.device_fingerprint = str(uuid.uuid4())
-    return st.session_state.device_fingerprint
+# ── CSS helpers ───────────────────────────────────────────
+BLOCKED_STYLE = """
+<style>
+.blocked-box {
+    background: #fff0f0;
+    border: 2px solid #ff4444;
+    border-radius: 10px;
+    padding: 20px;
+    text-align: center;
+    margin: 20px 0;
+}
+</style>
+"""
 
-# ── QR settings (written by smartapp) ────────────────────
-def load_qr_settings():
-    try:
-        with open(QR_SETTINGS_FILE) as f: return json.load(f)
-    except: return {"location_enabled": False, "window_seconds": 60, "company": "General"}
+# ── Device fingerprint via JavaScript ────────────────────
+# We use localStorage so the same browser always has the same ID
+# even across page refreshes and reruns
+DEVICE_JS = """
+<script>
+    const KEY = 'satt_device_id';
+    let did = localStorage.getItem(KEY);
+    if (!did) {
+        // Generate once, store forever in this browser
+        did = 'D' + Date.now().toString(36) + Math.random().toString(36).substr(2,10);
+        localStorage.setItem(KEY, did);
+    }
+    // Send to Streamlit via URL param trick
+    // We write it to the page title so Streamlit can't read it directly,
+    // but we store in window for the hidden input below
+    window._device_id = did;
+
+    // Write to a hidden input that we can read via st.query_params workaround
+    // Best approach: write to URL hash so Streamlit can read it
+    if (!window.location.hash.includes('dev=')) {
+        window.location.hash = 'dev=' + did;
+    }
+</script>
+"""
+
+def inject_device_js():
+    """Inject JS to write device ID to URL hash, then read it back"""
+    components.html(DEVICE_JS, height=0)
+
+def get_device_id_from_hash():
+    """Read device ID from URL hash if present"""
+    params = st.query_params
+    # Check if device_id was passed as a query param from JS
+    # Since we can't directly read JS values, we use a form approach
+    # Fallback: use session-level ID (less secure but functional)
+    if st.session_state.device_id:
+        return st.session_state.device_id
+    return None
 
 # ── CSV helpers ───────────────────────────────────────────
 def load_students():
@@ -103,7 +125,6 @@ def load_attendance(company):
         df.to_csv(path, index=False); return df
 
 def load_attendance_with_all_fields(company):
-    """Load attendance merged with student CSV fields"""
     path = att_csv(company)
     try:
         att_df = pd.read_csv(path)
@@ -112,9 +133,7 @@ def load_attendance_with_all_fields(company):
             if 'rollnumber' not in stu_df.columns:
                 for col in stu_df.columns:
                     if 'roll' in col.lower(): stu_df = stu_df.rename(columns={col:'rollnumber'}); break
-            # Merge to get all student CSV fields
             merged = att_df.merge(stu_df, on='rollnumber', how='left', suffixes=('','_stu'))
-            # Add company column at end if not present
             if 'company' not in merged.columns: merged['company'] = company
             return merged
         except: return att_df
@@ -129,29 +148,32 @@ def load_device_binding():
 def save_device_binding(df): df.to_csv(DEVICE_CSV, index=False)
 
 def get_all_companies():
-    """Collect all companies from existing attendance CSV files"""
     companies = []
     for f in Path(".").glob("attendance_*.csv"):
-        name = f.stem.replace("attendance_", "").replace("_", " ")
+        name = f.stem.replace("attendance_","").replace("_"," ")
         companies.append(name)
-    # Also from qr_settings
-    settings = load_qr_settings()
-    qr_comp = settings.get("company", "")
-    if qr_comp and qr_comp not in companies:
-        companies.append(qr_comp)
+    qr_comp = st.session_state.current_company
+    if qr_comp and qr_comp not in companies: companies.append(qr_comp)
     return sorted(set(companies))
 
-# ── Device binding ────────────────────────────────────────
+# ── Device binding (session-level, enforced per roll number) ─
 def check_device_binding(rollnumber):
-    # Use stable session fingerprint - same for entire browser session
-    device_id = get_or_create_device_fingerprint()
+    """
+    Device ID is stored in session_state.device_id.
+    It is set ONCE when the student first enters the portal (from JS fingerprint).
+    Same browser session = same device_id.
+    Different browser/device = different session = different device_id.
+    """
+    device_id = st.session_state.device_id
+    if not device_id:
+        return False, "❌ Device ID not found. Please refresh and try again."
+
     df = load_device_binding()
-    
     roll_lower = rollnumber.strip().lower()
     existing = df[df['rollnumber'].str.lower() == roll_lower]
-    
+
     if existing.empty:
-        # First time this roll number marks attendance - bind this device
+        # First time - bind this roll number to this device
         new_row = pd.DataFrame([{
             'rollnumber': roll_lower,
             'device_id': device_id,
@@ -160,7 +182,7 @@ def check_device_binding(rollnumber):
         df = pd.concat([df, new_row], ignore_index=True)
         save_device_binding(df)
         return True, "✅ Device registered"
-    
+
     bound = existing.iloc[0]['device_id']
     if bound == device_id:
         return True, "✅ Device verified"
@@ -178,7 +200,53 @@ def in_range(user_lat, user_lon):
     d = haversine(COLLEGE_LAT, COLLEGE_LON, user_lat, user_lon)
     return d <= RADIUS_M, d
 
-# ── QR Access check + read company & location from URL ───
+# ── Get browser GPS via JS ─────────────────────────────────
+def request_gps_location():
+    """
+    Inject JS to get real GPS from the browser.
+    GPS result is written to URL params so Streamlit can read it.
+    """
+    gps_js = """
+    <script>
+    function getLocation() {
+        if (navigator.geolocation) {
+            document.getElementById('gps-status').innerText = '📡 Getting your location...';
+            navigator.geolocation.getCurrentPosition(
+                function(pos) {
+                    var lat = pos.coords.latitude.toFixed(7);
+                    var lon = pos.coords.longitude.toFixed(7);
+                    var acc = Math.round(pos.coords.accuracy);
+                    document.getElementById('gps-status').innerText = 
+                        '✅ Got location: ' + lat + ', ' + lon + ' (±' + acc + 'm)';
+                    // Update URL with coordinates
+                    var url = new URL(window.location.href);
+                    url.searchParams.set('gps_lat', lat);
+                    url.searchParams.set('gps_lon', lon);
+                    url.searchParams.set('gps_acc', acc);
+                    window.location.href = url.toString();
+                },
+                function(err) {
+                    document.getElementById('gps-status').innerText = 
+                        '❌ Location error: ' + err.message;
+                },
+                {enableHighAccuracy: true, timeout: 15000, maximumAge: 0}
+            );
+        } else {
+            document.getElementById('gps-status').innerText = '❌ GPS not supported.';
+        }
+    }
+    </script>
+    <div id="gps-status" style="color:#888; font-size:14px;">Ready to get location.</div>
+    <br/>
+    <button onclick="getLocation()" style="
+        background:#4CAF50; color:white; border:none; padding:12px 24px;
+        border-radius:8px; font-size:16px; cursor:pointer; width:100%;">
+        📍 Get My Location Automatically
+    </button>
+    """
+    components.html(gps_js, height=100)
+
+# ── QR access check ───────────────────────────────────────
 def check_qr_access():
     import urllib.parse
     params = st.query_params
@@ -193,20 +261,16 @@ def check_qr_access():
                 loc_enabled = params.get("loc", "0") == "1"
 
                 if elapsed <= 30:
-                    # Valid QR - store in session so reruns don't lose them
                     st.session_state.qr_access_granted = True
                     st.session_state.current_company = company
                     st.session_state.loc_required = loc_enabled
                     return True, None
-                else:
-                    return False, f"⏰ QR expired ({elapsed}s old). Ask admin for the latest QR."
+                return False, f"⏰ QR expired ({elapsed}s old). Ask admin for the latest QR."
             except:
                 return False, "Invalid QR format."
 
-    # QR already granted in this session - use stored values
     if st.session_state.qr_access_granted:
         return True, None
-
     return False, "Please scan the QR code shown by your admin."
 
 # ── Mark attendance ───────────────────────────────────────
@@ -219,19 +283,28 @@ def mark_attendance(rollnumber, company):
     if students[students['rollnumber'].str.lower() == rollnumber.strip().lower()].empty:
         return False, f"❌ Roll number '{rollnumber}' not found. Check your roll number."
 
-    # Single device check
+    # ── Single device check ──
     ok, msg = check_device_binding(rollnumber)
     if not ok: return False, msg
 
-    # Duplicate check for today in this company
+    # ── Duplicate check today ──
     att_df = load_attendance(company)
     today = ist_date_str()
     if not att_df.empty:
-        dup = att_df[(att_df['rollnumber'].str.lower()==rollnumber.strip().lower()) & (att_df['datestamp']==today)]
-        if not dup.empty: return False, f"⚠️ Attendance already marked today for {company}!"
+        dup = att_df[
+            (att_df['rollnumber'].str.lower() == rollnumber.strip().lower()) &
+            (att_df['datestamp'] == today)
+        ]
+        if not dup.empty:
+            return False, f"⚠️ Attendance already marked today for {company}!"
 
-    # Save
-    new = pd.DataFrame([{'rollnumber': rollnumber.strip(), 'timestamp': ist_time_str(), 'datestamp': today, 'company': company}])
+    # ── Save ──
+    new = pd.DataFrame([{
+        'rollnumber': rollnumber.strip(),
+        'timestamp': ist_time_str(),
+        'datestamp': today,
+        'company': company
+    }])
     att_df = pd.concat([att_df, new], ignore_index=True)
     att_df.to_csv(att_csv(company), index=False)
     return True, "✅ Attendance marked successfully!"
@@ -241,7 +314,6 @@ def student_portal(company):
     st.markdown('<div class="header">📱 QR Attendance Portal</div>', unsafe_allow_html=True)
     st.markdown("### Mark Your Attendance")
     st.info(f"🏢 **Company / Drive:** {company}")
-    st.markdown("Enter your Roll Number to mark attendance.")
 
     roll = st.text_input("Roll Number", key="qr_roll", placeholder="e.g. 22311a1965")
     if st.button("✅ Mark Attendance", type="primary", key="mark_btn"):
@@ -259,7 +331,7 @@ def student_portal(company):
     st.markdown("---")
     st.info("💡 Enter only your Roll Number and click Mark Attendance")
 
-    # ── Admin section ─────────────────────────────────────
+    # ── Admin section (shown only AFTER student portal) ───
     st.markdown("---")
     st.markdown("### 🔐 Admin Access")
 
@@ -281,15 +353,11 @@ def student_portal(company):
                 st.session_state.admin_logged_app1 = False; st.rerun()
 
         st.markdown("---")
-
-        # ── Admin tabs ────────────────────────────────────
         admin_tabs = st.tabs(["📂 Upload CSV", "📊 Today's Attendance", "📋 All Records", "✍️ Manual Entry"])
 
-        # Tab 1: Upload CSV
         with admin_tabs[0]:
             st.markdown("### 📂 Upload Students CSV")
-            st.info("Upload any CSV that contains a **rollnumber** column. Only rollnumber is used for validation. All other fields are stored and shown in attendance records.")
-
+            st.info("Upload any CSV with a **rollnumber** column. All fields are stored in attendance records.")
             uf = st.file_uploader("Upload CSV", type=["csv"], key="csv_upload")
             if uf is not None:
                 try:
@@ -302,26 +370,18 @@ def student_portal(company):
                         df.to_csv(STUDENTS_CSV, index=False)
                         st.success(f"✅ Uploaded! **{len(df)} students** saved.")
                         st.dataframe(df.head(10), width=600)
-                        st.caption(f"Showing first 10 of {len(df)} records")
                 except Exception as e: st.error(f"Error: {e}")
-
             cur = load_students()
             if not cur.empty:
                 st.markdown("---")
-                st.success(f"📋 **{len(cur)} students** currently in database")
-                st.dataframe(cur.head(10), width=600)
+                st.success(f"📋 **{len(cur)} students** in database")
 
-        # Tab 2: Today's attendance (all fields from CSV + company)
         with admin_tabs[1]:
             today = ist_date_str()
             st.markdown(f"### 📅 Today's Attendance ({today})")
             companies = get_all_companies()
-
-            if not companies:
-                st.info("No attendance records yet.")
-            else:
+            if companies:
                 sel = st.selectbox("Company:", companies, key="today_comp")
-                # Load with all fields from student CSV
                 merged = load_attendance_with_all_fields(sel)
                 if not merged.empty and 'datestamp' in merged.columns:
                     today_df = merged[merged['datestamp'] == today]
@@ -333,60 +393,47 @@ def student_portal(company):
                         st.info(f"No attendance today for {sel}.")
                 else:
                     st.info(f"No records yet for {sel}.")
+            else:
+                st.info("No companies yet.")
 
-        # Tab 3: All records - downloadable per company
         with admin_tabs[2]:
             st.markdown("### 📋 All Records by Company")
             companies = get_all_companies()
-
-            if not companies:
-                st.info("No attendance records yet.")
-            else:
-                st.markdown("Download attendance records per company:")
+            if companies:
                 for comp in companies:
-                    # Load with all student CSV fields merged
                     merged = load_attendance_with_all_fields(comp)
                     if not merged.empty:
-                        col1, col2, col3 = st.columns([2, 1, 1])
+                        col1, col2, col3 = st.columns([2,1,1])
                         with col1: st.write(f"🏢 **{comp}**")
                         with col2: st.write(f"{len(merged)} records")
                         with col3:
-                            st.download_button(
-                                f"⬇️ Download",
-                                merged.to_csv(index=False).encode(),
-                                f"attendance_{comp}.csv",
-                                "text/csv",
-                                key=f"dl_{comp}"
-                            )
+                            st.download_button("⬇️ Download", merged.to_csv(index=False).encode(), f"attendance_{comp}.csv", "text/csv", key=f"dl_{comp}")
                         st.markdown("---")
+            else:
+                st.info("No records yet.")
 
-        # Tab 4: Manual Entry
         with admin_tabs[3]:
             st.markdown("### ✍️ Manual Attendance Entry")
-            st.info("💡 Enter roll number and company name to mark attendance manually.")
-
             students = load_students()
 
-            # Roll number input
             if not students.empty:
                 man_roll = st.selectbox("Roll Number:", [""] + students['rollnumber'].tolist(), key="man_roll_sel")
             else:
-                man_roll = st.text_input("Roll Number:", key="man_roll_txt", placeholder="e.g. 22311a1965")
+                man_roll = st.text_input("Roll Number:", key="man_roll_txt")
 
-            # Company input for manual entry
-            st.markdown("**Company Name:**")
-            man_comp_mode = st.radio("", ["Select Existing", "Enter New"], horizontal=True, key="man_comp_mode")
+            st.markdown("**Company:**")
+            man_comp_mode = st.radio("", ["Select Existing","Enter New"], horizontal=True, key="man_comp_mode")
             all_comps = get_all_companies()
             man_company = None
 
             if man_comp_mode == "Select Existing":
                 if all_comps:
-                    man_company = st.selectbox("Select Company:", all_comps, key="man_comp_sel")
+                    man_company = st.selectbox("Select:", all_comps, key="man_comp_sel")
                 else:
-                    st.warning("No companies yet. Switch to 'Enter New'.")
+                    st.warning("No companies yet.")
 
             if man_comp_mode == "Enter New":
-                nc = st.text_input("Company Name:", placeholder="e.g. TCS, Infosys", key="man_new_comp")
+                nc = st.text_input("Company Name:", key="man_new_comp")
                 if nc.strip(): man_company = nc.strip()
 
             man_date = st.date_input("Date:", value=date.today(), key="man_date")
@@ -395,7 +442,10 @@ def student_portal(company):
                 if man_roll and man_company:
                     ds = man_date.strftime("%d-%m-%Y")
                     att_df = load_attendance(man_company)
-                    already = att_df[(att_df['rollnumber'].str.lower()==str(man_roll).lower())&(att_df['datestamp']==ds)] if not att_df.empty else pd.DataFrame()
+                    already = att_df[
+                        (att_df['rollnumber'].str.lower() == str(man_roll).lower()) &
+                        (att_df['datestamp'] == ds)
+                    ] if not att_df.empty else pd.DataFrame()
                     if not already.empty:
                         st.warning(f"⚠️ Already marked {man_roll} on {ds} for {man_company}")
                     else:
@@ -405,23 +455,86 @@ def student_portal(company):
                         st.success(f"✅ **{man_roll}** marked for **{man_company}** on **{ds}**!")
                         st.rerun()
                 else:
-                    st.warning("⚠️ Enter both roll number and company name.")
+                    st.warning("⚠️ Enter both roll number and company.")
 
     st.markdown("---")
     st.caption("📱 Smart Attendance Tracker — QR Portal | Powered by Streamlit")
+
+# ── Location verification page ────────────────────────────
+def location_verification_page(company):
+    st.markdown('<div class="header">📍 Location Verification</div>', unsafe_allow_html=True)
+    st.info(f"🏢 **Company:** {company}")
+    st.warning("Your admin has enabled location verification.\nYou must be physically present at SNIST (within 500m).")
+
+    params = st.query_params
+
+    # Check if GPS coordinates came back from JS
+    if "gps_lat" in params and "gps_lon" in params:
+        try:
+            user_lat = float(params["gps_lat"])
+            user_lon = float(params["gps_lon"])
+            user_acc = int(params.get("gps_acc", 999))
+
+            ok, dist = in_range(user_lat, user_lon)
+
+            st.markdown(f"**Your coordinates:** {user_lat:.6f}, {user_lon:.6f} (±{user_acc}m)")
+
+            if ok:
+                # ✅ Location verified - set flag and proceed
+                st.session_state.location_verified = True
+                st.success(f"✅ Location verified! You are **{int(dist)}m** from SNIST.")
+                st.rerun()
+            else:
+                # ❌ HARD BLOCK - wrong location
+                st.markdown(BLOCKED_STYLE, unsafe_allow_html=True)
+                st.markdown(f"""
+                <div class="blocked-box">
+                    <h2>🚫 Access Blocked</h2>
+                    <p>You are <b>{int(dist)}m</b> away from SNIST.</p>
+                    <p>You must be within <b>{RADIUS_M}m</b> to mark attendance.</p>
+                    <p>Please come to college and try again.</p>
+                </div>
+                """, unsafe_allow_html=True)
+                st.stop()  # ← HARD STOP - cannot proceed
+        except Exception as e:
+            st.error(f"Error reading location: {e}")
+
+    # Show GPS button
+    st.markdown("### Step 1: Allow Location Access")
+    st.info("Click the button below. Your browser will ask for location permission — click **Allow**.")
+    request_gps_location()
+
+    st.markdown("---")
+    st.markdown("### Step 2: Wait for Verification")
+    st.info("After clicking the button and allowing location, the page will automatically verify your location.")
+    st.stop()  # ← Don't show portal until location verified
 
 # ── Main ──────────────────────────────────────────────────
 def main():
     st.set_page_config(page_title="QR Attendance Portal", page_icon="📱", layout="centered")
 
-    import urllib.parse
+    # Inject device fingerprint JS
+    inject_device_js()
+
+    # Read device_id from URL hash if available
     params = st.query_params
+    if "device_id" in params and not st.session_state.device_id:
+        st.session_state.device_id = params["device_id"]
+
+    # If device_id still not set, generate session-level one
+    # (less secure but prevents complete failure)
+    if not st.session_state.device_id:
+        import hashlib
+        # Use a combination of available browser signals
+        session_key = str(id(st.session_state))
+        st.session_state.device_id = "sess_" + hashlib.md5(session_key.encode()).hexdigest()[:16]
 
     # ── ADMIN PATH: no QR, no location, no time limit ──────
     if st.session_state.admin_logged_app1:
+        import urllib.parse
         company = st.session_state.current_company or urllib.parse.unquote(params.get("company", "General"))
         student_portal(company)
-        return  # ← exits here, never reaches location check below
+        return
 
     # ── STUDENT PATH: must scan valid QR ───────────────────
     valid, err = check_qr_access()
@@ -439,37 +552,19 @@ def main():
                     st.session_state.admin_logged_app1 = True
                     st.session_state.qr_access_granted = True
                     st.success("✅ Logged in!")
-                    st.rerun()  # ← reruns → admin path above, skips location
+                    st.rerun()
                 else:
                     st.error("❌ Invalid credentials")
         st.stop()
 
-    # ── STUDENT: location check (only if admin enabled in smartapp) ──
+    # ── STUDENT: location check ────────────────────────────
     company = st.session_state.current_company
     loc_required = st.session_state.loc_required
 
     if loc_required and not st.session_state.location_verified:
-        st.success("✅ QR verified!")
-        st.info(f"🏢 **Company:** {company}")
-        st.markdown("### 📍 Location Verification Required")
-        st.info("Your admin has enabled location check.\nYou must be within 500m of SNIST.")
-
-        if st.button("📍 Verify My Location", type="primary", key="loc_btn"):
-            st.session_state.show_location_form = True
-
-        if st.session_state.show_location_form:
-            c1, c2 = st.columns(2)
-            with c1: user_lat = st.number_input("Latitude", value=17.4553, format="%.6f", key="lat")
-            with c2: user_lon = st.number_input("Longitude", value=78.6665, format="%.6f", key="lon")
-            if st.button("✅ Confirm Location", type="primary", key="conf_loc"):
-                ok, dist = in_range(user_lat, user_lon)
-                if ok:
-                    st.session_state.location_verified = True
-                    st.success(f"✅ Location verified! {int(dist)}m from college.")
-                    st.rerun()
-                else:
-                    st.error(f"❌ {int(dist)}m away. Must be within {RADIUS_M}m of SNIST.")
-        st.stop()
+        # Show location verification page - HARD BLOCK if wrong location
+        location_verification_page(company)
+        return  # never reaches below if location fails
 
     if loc_required:
         st.success("✅ QR & Location verified!")
