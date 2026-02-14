@@ -1,122 +1,118 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, date
-import time
-import os
-import json
-import uuid
+from datetime import datetime, date, timezone, timedelta
+import time, json, uuid, os, warnings
 from pathlib import Path
 from math import radians, sin, cos, sqrt, atan2
-import warnings
 
 warnings.filterwarnings('ignore')
 os.environ["PYTHONWARNINGS"] = "ignore"
 
-# ------------------------------
-# IST Timezone helpers
-from datetime import timezone, timedelta
 IST = timezone(timedelta(hours=5, minutes=30))
+def ist_now(): return datetime.now(IST)
+def ist_time_str(): return ist_now().strftime("%H:%M:%S")
+def ist_date_str(): return ist_now().strftime("%d-%m-%Y")
+def ist_datetime_str(): return ist_now().strftime("%d-%m-%Y %H:%M:%S")
 
-def ist_now():
-    return datetime.now(IST)
-
-def ist_time_str():
-    return ist_now().strftime("%H:%M:%S")
-
-def ist_date_str():
-    return ist_now().strftime("%d-%m-%Y")
-
-def ist_datetime_str():
-    return ist_now().strftime("%d-%m-%Y %H:%M:%S")
-
-# ------------------------------
-# Load secrets
 try:
     ADMIN_USERNAME = st.secrets["admin_user"]["username"]
     ADMIN_PASSWORD = st.secrets["admin_user"]["password"]
     ADMINS = {ADMIN_USERNAME: {"password": ADMIN_PASSWORD}}
 except KeyError as e:
-    st.error(f"Missing secret: {e}")
-    st.stop()
+    st.error(f"Missing secret: {e}"); st.stop()
 
-# ------------------------------
-# College location (SNIST)
-COLLEGE_LATITUDE = 17.4553223
-COLLEGE_LONGITUDE = 78.6664965
-ALLOWED_RADIUS_METERS = 500
+COLLEGE_LAT, COLLEGE_LON, RADIUS_M = 17.4553223, 78.6664965, 500
 
-# File paths
-STUDENTS_NEW_CSV = "students_new.csv"
-ATTENDANCE_NEW_CSV = "attendance_new.csv"
-DEVICE_BINDING_CSV = "device_binding.csv"
+STUDENTS_CSV     = "students_new.csv"
+DEVICE_CSV       = "device_binding.csv"
 QR_SETTINGS_FILE = "qr_settings.json"
 
-# ------------------------------
-# Session state
-for key, default in {
+def att_csv(company): return f"attendance_{company.strip().replace(' ','_')}.csv"
+
+def local_css():
+    try:
+        p = Path(__file__).parent / "style.css"
+        if p.exists(): st.markdown(f"<style>{p.read_text()}</style>", unsafe_allow_html=True)
+    except: pass
+
+local_css()
+
+for k, v in {
     "admin_logged_app1": False,
     "qr_access_granted": False,
     "location_verified": False,
     "show_location_form": False,
     "device_fingerprint": None,
 }.items():
-    if key not in st.session_state:
-        st.session_state[key] = default
+    if k not in st.session_state: st.session_state[k] = v
 
-# ------------------------------
-# Load QR settings saved by app12
+# ── QR settings (written by smartapp) ────────────────────
 def load_qr_settings():
     try:
-        with open(QR_SETTINGS_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        # Default: no location check
-        return {"location_enabled": False, "window_seconds": 60}
+        with open(QR_SETTINGS_FILE) as f: return json.load(f)
+    except: return {"location_enabled": False, "window_seconds": 60, "company": "General"}
 
-# ------------------------------
-# CSV helpers
+# ── CSV helpers ───────────────────────────────────────────
 def load_students():
     try:
-        df = pd.read_csv(STUDENTS_NEW_CSV)
-        # Auto detect rollnumber column
+        df = pd.read_csv(STUDENTS_CSV)
         if 'rollnumber' not in df.columns:
             for col in df.columns:
-                if 'roll' in col.lower():
-                    df = df.rename(columns={col: 'rollnumber'})
-                    break
+                if 'roll' in col.lower(): return df.rename(columns={col:'rollnumber'})
         return df
-    except FileNotFoundError:
-        return pd.DataFrame(columns=["rollnumber"])
-    except Exception:
-        return pd.DataFrame(columns=["rollnumber"])
+    except: return pd.DataFrame(columns=["rollnumber"])
 
-def load_attendance():
+def load_attendance(company):
+    path = att_csv(company)
     try:
-        df = pd.read_csv(ATTENDANCE_NEW_CSV)
-        expected = ["rollnumber", "timestamp", "datestamp"]
-        for col in expected:
-            if col not in df.columns:
-                df[col] = ""
-        return df[expected]
-    except FileNotFoundError:
-        df = pd.DataFrame(columns=["rollnumber", "timestamp", "datestamp"])
-        df.to_csv(ATTENDANCE_NEW_CSV, index=False)
-        return df
+        df = pd.read_csv(path)
+        for c in ["rollnumber","timestamp","datestamp","company"]:
+            if c not in df.columns: df[c]=""
+        return df[["rollnumber","timestamp","datestamp","company"]]
+    except:
+        df = pd.DataFrame(columns=["rollnumber","timestamp","datestamp","company"])
+        df.to_csv(path, index=False); return df
+
+def load_attendance_with_all_fields(company):
+    """Load attendance merged with student CSV fields"""
+    path = att_csv(company)
+    try:
+        att_df = pd.read_csv(path)
+        try:
+            stu_df = pd.read_csv(STUDENTS_CSV)
+            if 'rollnumber' not in stu_df.columns:
+                for col in stu_df.columns:
+                    if 'roll' in col.lower(): stu_df = stu_df.rename(columns={col:'rollnumber'}); break
+            # Merge to get all student CSV fields
+            merged = att_df.merge(stu_df, on='rollnumber', how='left', suffixes=('','_stu'))
+            # Add company column at end if not present
+            if 'company' not in merged.columns: merged['company'] = company
+            return merged
+        except: return att_df
+    except: return pd.DataFrame()
 
 def load_device_binding():
-    try:
-        df = pd.read_csv(DEVICE_BINDING_CSV)
-        return df
-    except FileNotFoundError:
-        df = pd.DataFrame(columns=["rollnumber", "device_id", "bound_at"])
-        df.to_csv(DEVICE_BINDING_CSV, index=False)
-        return df
+    try: return pd.read_csv(DEVICE_CSV)
+    except:
+        df = pd.DataFrame(columns=["rollnumber","device_id","bound_at"])
+        df.to_csv(DEVICE_CSV, index=False); return df
 
-def save_device_binding(df):
-    df.to_csv(DEVICE_BINDING_CSV, index=False)
+def save_device_binding(df): df.to_csv(DEVICE_CSV, index=False)
 
-# ------------------------------
-# Device fingerprint
+def get_all_companies():
+    """Collect all companies from existing attendance CSV files"""
+    companies = []
+    for f in Path(".").glob("attendance_*.csv"):
+        name = f.stem.replace("attendance_", "").replace("_", " ")
+        companies.append(name)
+    # Also from qr_settings
+    settings = load_qr_settings()
+    qr_comp = settings.get("company", "")
+    if qr_comp and qr_comp not in companies:
+        companies.append(qr_comp)
+    return sorted(set(companies))
+
+# ── Device binding ────────────────────────────────────────
 def get_device_fingerprint():
     if not st.session_state.device_fingerprint:
         st.session_state.device_fingerprint = str(uuid.uuid4())
@@ -124,321 +120,308 @@ def get_device_fingerprint():
 
 def check_device_binding(rollnumber):
     device_id = get_device_fingerprint()
-    device_df = load_device_binding()
-
-    existing = device_df[device_df['rollnumber'].str.lower() == rollnumber.lower()]
-
+    df = load_device_binding()
+    existing = df[df['rollnumber'].str.lower() == rollnumber.lower()]
     if existing.empty:
-        # First time - bind device
-        new_binding = pd.DataFrame([{
-            'rollnumber': rollnumber.lower(),
-            'device_id': device_id,
-            'bound_at': ist_datetime_str()
-        }])
-        device_df = pd.concat([device_df, new_binding], ignore_index=True)
-        save_device_binding(device_df)
+        new_row = pd.DataFrame([{'rollnumber': rollnumber.lower(), 'device_id': device_id, 'bound_at': ist_datetime_str()}])
+        df = pd.concat([df, new_row], ignore_index=True)
+        save_device_binding(df)
         return True, "✅ Device registered"
-    else:
-        bound_device = existing.iloc[0]['device_id']
-        if bound_device == device_id:
-            return True, "✅ Device verified"
-        else:
-            return False, "❌ This roll number is already registered on another device. Contact admin to unbind your device."
+    bound = existing.iloc[0]['device_id']
+    if bound == device_id: return True, "✅ Device verified"
+    return False, "❌ Roll number already registered on another device. Contact admin to unbind."
 
-# ------------------------------
-# Location helpers
-def calculate_distance(lat1, lon1, lat2, lon2):
+# ── Location ─────────────────────────────────────────────
+def haversine(lat1, lon1, lat2, lon2):
     R = 6371000
     lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
-    c = 2 * atan2(sqrt(a), sqrt(1-a))
-    return R * c
+    dlat, dlon = lat2-lat1, lon2-lon1
+    a = sin(dlat/2)**2 + cos(lat1)*cos(lat2)*sin(dlon/2)**2
+    return R * 2 * atan2(sqrt(a), sqrt(1-a))
 
-def check_location_in_range(user_lat, user_lon):
-    distance = calculate_distance(COLLEGE_LATITUDE, COLLEGE_LONGITUDE, user_lat, user_lon)
-    return distance <= ALLOWED_RADIUS_METERS, distance
+def in_range(user_lat, user_lon):
+    d = haversine(COLLEGE_LAT, COLLEGE_LON, user_lat, user_lon)
+    return d <= RADIUS_M, d
 
-# ------------------------------
-# QR Access check
+# ── QR Access check ───────────────────────────────────────
 def check_qr_access():
-    query_params = st.query_params
-    if "access" in query_params:
-        token = query_params["access"]
+    params = st.query_params
+    if "access" in params:
+        token = params["access"]
         if token.startswith("qr_"):
             try:
-                qr_timestamp = int(token.replace("qr_", ""))
-                time_elapsed = int(time.time()) - qr_timestamp
-                # Each QR is valid for 30 seconds (refresh window)
-                if time_elapsed <= 30:
+                ts = int(token.replace("qr_", ""))
+                elapsed = int(time.time()) - ts
+                if elapsed <= 30:
                     st.session_state.qr_access_granted = True
                     return True, None
-                else:
-                    return False, f"⏰ QR Code expired! ({time_elapsed}s old). Ask admin to show the latest QR."
-            except Exception:
-                return False, "Invalid QR format"
-    if st.session_state.qr_access_granted:
-        return True, None
-    return False, "No valid QR scanned. Please scan the QR code shown by your admin."
+                return False, f"⏰ QR expired ({elapsed}s old). Ask admin for the latest QR."
+            except: return False, "Invalid QR format."
+    if st.session_state.qr_access_granted: return True, None
+    return False, "Please scan the QR code shown by your admin."
 
-# ------------------------------
-# Mark attendance
-def mark_attendance(rollnumber):
-    students_df = load_students()
-
-    if 'rollnumber' not in students_df.columns or students_df.empty:
+# ── Mark attendance ───────────────────────────────────────
+def mark_attendance(rollnumber, company):
+    students = load_students()
+    if students.empty or 'rollnumber' not in students.columns:
         return False, "❌ Student database not loaded. Contact admin."
 
-    # Strip and compare rollnumber only
-    students_df['rollnumber'] = students_df['rollnumber'].astype(str).str.strip()
-    match = students_df[students_df['rollnumber'].str.lower() == rollnumber.strip().lower()]
+    students['rollnumber'] = students['rollnumber'].astype(str).str.strip()
+    if students[students['rollnumber'].str.lower() == rollnumber.strip().lower()].empty:
+        return False, f"❌ Roll number '{rollnumber}' not found. Check your roll number."
 
-    if match.empty:
-        return False, f"❌ Roll number '{rollnumber}' not found in database. Check your roll number or contact admin."
+    # Single device check
+    ok, msg = check_device_binding(rollnumber)
+    if not ok: return False, msg
 
-    # Device check
-    device_ok, device_msg = check_device_binding(rollnumber)
-    if not device_ok:
-        return False, device_msg
-
-    # Check already marked today
-    attendance_df = load_attendance()
+    # Duplicate check for today in this company
+    att_df = load_attendance(company)
     today = ist_date_str()
+    if not att_df.empty:
+        dup = att_df[(att_df['rollnumber'].str.lower()==rollnumber.strip().lower()) & (att_df['datestamp']==today)]
+        if not dup.empty: return False, f"⚠️ Attendance already marked today for {company}!"
 
-    if not attendance_df.empty:
-        already = attendance_df[
-            (attendance_df['rollnumber'].str.lower() == rollnumber.strip().lower()) &
-            (attendance_df['datestamp'] == today)
-        ]
-        if not already.empty:
-            return False, "⚠️ Attendance already marked today!"
-
-    # Save attendance
-    new_entry = pd.DataFrame([{
-        'rollnumber': rollnumber.strip(),
-        'timestamp': ist_time_str(),
-        'datestamp': today
-    }])
-    attendance_df = pd.concat([attendance_df, new_entry], ignore_index=True)
-    attendance_df.to_csv(ATTENDANCE_NEW_CSV, index=False)
-
+    # Save
+    new = pd.DataFrame([{'rollnumber': rollnumber.strip(), 'timestamp': ist_time_str(), 'datestamp': today, 'company': company}])
+    att_df = pd.concat([att_df, new], ignore_index=True)
+    att_df.to_csv(att_csv(company), index=False)
     return True, "✅ Attendance marked successfully!"
 
-# ------------------------------
-# CSS
-def local_css(file_name="style.css"):
-    try:
-        base = Path(__file__).parent
-    except Exception:
-        base = Path.cwd()
-    try:
-        css_path = base / file_name
-        if css_path.exists():
-            with open(css_path, encoding="utf-8") as f:
-                st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
-    except Exception:
-        pass
-
-local_css()
-
-# ------------------------------
-# QR Student Portal
-def qr_student_portal():
+# ── Student portal ────────────────────────────────────────
+def student_portal(company):
     st.markdown('<div class="header">📱 QR Attendance Portal</div>', unsafe_allow_html=True)
     st.markdown("### Mark Your Attendance")
+    st.info(f"🏢 **Company / Drive:** {company}")
+    st.markdown("Enter your Roll Number to mark attendance.")
 
-    with st.container():
-        st.markdown("Enter your Roll Number to mark attendance.")
-
-        rollnumber = st.text_input(
-            "Roll Number",
-            key="qr_roll",
-            placeholder="e.g. 22311a1965"
-        )
-
-        if st.button("✅ Mark Attendance", key="mark_btn", type="primary"):
-            if rollnumber.strip():
-                with st.spinner("Marking attendance..."):
-                    success, message = mark_attendance(rollnumber)
-                if success:
-                    st.success(message)
-                    st.balloons()
-                    st.info(f"**Roll Number:** {rollnumber.strip()} | **Time:** {ist_time_str()} | **Date:** {ist_date_str()}")
-                else:
-                    st.error(message)
+    roll = st.text_input("Roll Number", key="qr_roll", placeholder="e.g. 22311a1965")
+    if st.button("✅ Mark Attendance", type="primary", key="mark_btn"):
+        if roll.strip():
+            with st.spinner("Marking attendance..."):
+                ok, msg = mark_attendance(roll, company)
+            if ok:
+                st.success(msg); st.balloons()
+                st.info(f"**Roll:** {roll.strip()} | **Company:** {company} | **Time:** {ist_time_str()} | **Date:** {ist_date_str()}")
             else:
-                st.warning("⚠️ Please enter your Roll Number")
+                st.error(msg)
+        else:
+            st.warning("⚠️ Please enter your Roll Number")
 
     st.markdown("---")
     st.info("💡 Enter only your Roll Number and click Mark Attendance")
 
-    # Admin section at bottom
+    # ── Admin section ─────────────────────────────────────
     st.markdown("---")
     st.markdown("### 🔐 Admin Access")
 
     if not st.session_state.admin_logged_app1:
         with st.expander("🔑 Admin Login"):
-            u = st.text_input("Username", key="adm_user")
-            p = st.text_input("Password", type="password", key="adm_pass")
-            if st.button("Login", key="adm_login_btn"):
+            u = st.text_input("Username", key="adm_u")
+            p = st.text_input("Password", type="password", key="adm_p")
+            if st.button("Login", key="adm_login"):
                 if u in ADMINS and ADMINS[u]["password"] == p:
                     st.session_state.admin_logged_app1 = True
                     st.session_state.qr_access_granted = True
-                    st.success("✅ Logged in!")
-                    st.rerun()
-                else:
-                    st.error("❌ Invalid credentials")
+                    st.success("✅ Logged in!"); st.rerun()
+                else: st.error("❌ Invalid credentials")
     else:
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.success("✅ Admin logged in")
-        with col2:
-            if st.button("🚪 Logout", key="adm_logout"):
-                st.session_state.admin_logged_app1 = False
-                st.rerun()
+        c1, c2 = st.columns([3,1])
+        with c1: st.success("✅ Admin logged in")
+        with c2:
+            if st.button("🚪 Logout", key="adm_out"):
+                st.session_state.admin_logged_app1 = False; st.rerun()
 
         st.markdown("---")
-        admin_tabs = st.tabs(["📂 Upload Students CSV", "📊 Today's Attendance", "📋 All Records"])
 
+        # ── Admin tabs ────────────────────────────────────
+        admin_tabs = st.tabs(["📂 Upload CSV", "📊 Today's Attendance", "📋 All Records", "✍️ Manual Entry"])
+
+        # Tab 1: Upload CSV
         with admin_tabs[0]:
             st.markdown("### 📂 Upload Students CSV")
-            st.info("Upload your students CSV here. Only the **rollnumber** column is used for validation.")
+            st.info("Upload any CSV that contains a **rollnumber** column. Only rollnumber is used for validation. All other fields are stored and shown in attendance records.")
 
-            uploaded_file = st.file_uploader("Upload Students CSV", type=["csv"], key="admin_csv_upload")
-            if uploaded_file is not None:
+            uf = st.file_uploader("Upload CSV", type=["csv"], key="csv_upload")
+            if uf is not None:
                 try:
-                    df_uploaded = pd.read_csv(uploaded_file)
-                    # Auto-detect rollnumber column
-                    roll_col = None
-                    for col in df_uploaded.columns:
-                        if 'roll' in col.lower():
-                            roll_col = col
-                            break
-
+                    df = pd.read_csv(uf)
+                    roll_col = next((c for c in df.columns if 'roll' in c.lower()), None)
                     if roll_col is None:
-                        st.error("❌ No rollnumber column found! Make sure your CSV has a rollnumber column.")
+                        st.error("❌ No rollnumber column found!")
                     else:
-                        if roll_col != 'rollnumber':
-                            df_uploaded = df_uploaded.rename(columns={roll_col: 'rollnumber'})
-                        df_uploaded.to_csv(STUDENTS_NEW_CSV, index=False)
-                        st.success(f"✅ Uploaded! **{len(df_uploaded)}** student records saved.")
-                        st.dataframe(df_uploaded[['rollnumber']].head(10), width=400)
-                        st.caption(f"Showing first 10 of {len(df_uploaded)} records")
-                except Exception as e:
-                    st.error(f"Error: {e}")
+                        if roll_col != 'rollnumber': df = df.rename(columns={roll_col:'rollnumber'})
+                        df.to_csv(STUDENTS_CSV, index=False)
+                        st.success(f"✅ Uploaded! **{len(df)} students** saved.")
+                        st.dataframe(df.head(10), width=600)
+                        st.caption(f"Showing first 10 of {len(df)} records")
+                except Exception as e: st.error(f"Error: {e}")
 
-            # Show current
-            current = load_students()
-            if not current.empty and 'rollnumber' in current.columns:
+            cur = load_students()
+            if not cur.empty:
                 st.markdown("---")
-                st.success(f"📋 **Current database:** {len(current)} students")
-                st.dataframe(current[['rollnumber']], width=400)
-            else:
-                st.warning("No students loaded yet.")
+                st.success(f"📋 **{len(cur)} students** currently in database")
+                st.dataframe(cur.head(10), width=600)
 
+        # Tab 2: Today's attendance (all fields from CSV + company)
         with admin_tabs[1]:
             today = ist_date_str()
-            att_df = load_attendance()
-            today_df = att_df[att_df['datestamp'] == today] if not att_df.empty else pd.DataFrame()
+            st.markdown(f"### 📅 Today's Attendance ({today})")
+            companies = get_all_companies()
 
-            if not today_df.empty:
-                st.success(f"📅 Today ({today}) - **{len(today_df)} present**")
-                st.dataframe(today_df, width=800)
-                csv = today_df.to_csv(index=False).encode('utf-8')
-                st.download_button("⬇️ Download Today's", csv, f"attendance_{today}.csv", "text/csv", key="dl_today")
+            if not companies:
+                st.info("No attendance records yet.")
             else:
-                st.info("No attendance today yet.")
+                sel = st.selectbox("Company:", companies, key="today_comp")
+                # Load with all fields from student CSV
+                merged = load_attendance_with_all_fields(sel)
+                if not merged.empty and 'datestamp' in merged.columns:
+                    today_df = merged[merged['datestamp'] == today]
+                    if not today_df.empty:
+                        st.success(f"**{len(today_df)} present** for {sel}")
+                        st.dataframe(today_df, width=900)
+                        st.download_button("⬇️ Download Today's", today_df.to_csv(index=False).encode(), f"att_{sel}_{today}.csv", "text/csv", key="dl_td")
+                    else:
+                        st.info(f"No attendance today for {sel}.")
+                else:
+                    st.info(f"No records yet for {sel}.")
 
+        # Tab 3: All records - downloadable per company
         with admin_tabs[2]:
-            att_df = load_attendance()
-            if not att_df.empty:
-                st.dataframe(att_df, width=800)
-                st.info(f"**Total Records:** {len(att_df)}")
-                csv_all = att_df.to_csv(index=False).encode('utf-8')
-                st.download_button("⬇️ Download All", csv_all, "attendance_all.csv", "text/csv", key="dl_all")
+            st.markdown("### 📋 All Records by Company")
+            companies = get_all_companies()
+
+            if not companies:
+                st.info("No attendance records yet.")
             else:
-                st.info("No records yet.")
+                st.markdown("Download attendance records per company:")
+                for comp in companies:
+                    # Load with all student CSV fields merged
+                    merged = load_attendance_with_all_fields(comp)
+                    if not merged.empty:
+                        col1, col2, col3 = st.columns([2, 1, 1])
+                        with col1: st.write(f"🏢 **{comp}**")
+                        with col2: st.write(f"{len(merged)} records")
+                        with col3:
+                            st.download_button(
+                                f"⬇️ Download",
+                                merged.to_csv(index=False).encode(),
+                                f"attendance_{comp}.csv",
+                                "text/csv",
+                                key=f"dl_{comp}"
+                            )
+                        st.markdown("---")
+
+        # Tab 4: Manual Entry
+        with admin_tabs[3]:
+            st.markdown("### ✍️ Manual Attendance Entry")
+            st.info("💡 Enter roll number and company name to mark attendance manually.")
+
+            students = load_students()
+
+            # Roll number input
+            if not students.empty:
+                man_roll = st.selectbox("Roll Number:", [""] + students['rollnumber'].tolist(), key="man_roll_sel")
+            else:
+                man_roll = st.text_input("Roll Number:", key="man_roll_txt", placeholder="e.g. 22311a1965")
+
+            # Company input for manual entry
+            st.markdown("**Company Name:**")
+            man_comp_mode = st.radio("", ["Select Existing", "Enter New"], horizontal=True, key="man_comp_mode")
+            all_comps = get_all_companies()
+            man_company = None
+
+            if man_comp_mode == "Select Existing":
+                if all_comps:
+                    man_company = st.selectbox("Select Company:", all_comps, key="man_comp_sel")
+                else:
+                    st.warning("No companies yet. Switch to 'Enter New'.")
+
+            if man_comp_mode == "Enter New":
+                nc = st.text_input("Company Name:", placeholder="e.g. TCS, Infosys", key="man_new_comp")
+                if nc.strip(): man_company = nc.strip()
+
+            man_date = st.date_input("Date:", value=date.today(), key="man_date")
+
+            if st.button("✅ Mark Attendance", type="primary", key="man_mark_btn"):
+                if man_roll and man_company:
+                    ds = man_date.strftime("%d-%m-%Y")
+                    att_df = load_attendance(man_company)
+                    already = att_df[(att_df['rollnumber'].str.lower()==str(man_roll).lower())&(att_df['datestamp']==ds)] if not att_df.empty else pd.DataFrame()
+                    if not already.empty:
+                        st.warning(f"⚠️ Already marked {man_roll} on {ds} for {man_company}")
+                    else:
+                        new = pd.DataFrame([{'rollnumber': str(man_roll).strip(), 'timestamp': ist_time_str(), 'datestamp': ds, 'company': man_company}])
+                        att_df = pd.concat([att_df, new], ignore_index=True)
+                        att_df.to_csv(att_csv(man_company), index=False)
+                        st.success(f"✅ **{man_roll}** marked for **{man_company}** on **{ds}**!")
+                        st.rerun()
+                else:
+                    st.warning("⚠️ Enter both roll number and company name.")
 
     st.markdown("---")
-    st.caption("📱 Smart Attendance Tracker - QR Portal | Powered by Streamlit")
+    st.caption("📱 Smart Attendance Tracker — QR Portal | Powered by Streamlit")
 
-# ------------------------------
-# Main
+# ── Main ──────────────────────────────────────────────────
 def main():
-    st.set_page_config(
-        page_title="QR Attendance Portal",
-        page_icon="📱",
-        layout="centered"
-    )
+    st.set_page_config(page_title="QR Attendance Portal", page_icon="📱", layout="centered")
 
-    # Admin always bypasses QR check
+    # Admin bypasses QR check entirely — stays forever
     if st.session_state.admin_logged_app1:
-        qr_student_portal()
+        settings = load_qr_settings()
+        student_portal(settings.get("company", "General"))
         return
 
-    # Check QR access for students
-    access_valid, error_msg = check_qr_access()
+    # Student path — must scan valid QR
+    valid, err = check_qr_access()
 
-    if not access_valid:
+    if not valid:
         st.error("🔒 **Access Denied**")
-        if error_msg:
-            st.warning(f"{error_msg}")
+        if err: st.warning(err)
         st.info("📱 Ask your admin to generate a QR code and scan it within 30 seconds.")
-
         st.markdown("---")
-        st.markdown("### 🔐 Admin Login")
         with st.expander("🔑 Admin Login (No time restriction)"):
-            u = st.text_input("Username", key="blocked_adm_user")
-            p = st.text_input("Password", type="password", key="blocked_adm_pass")
-            if st.button("Login", key="blocked_adm_btn"):
+            u = st.text_input("Username", key="bl_u")
+            p = st.text_input("Password", type="password", key="bl_p")
+            if st.button("Login", key="bl_btn"):
                 if u in ADMINS and ADMINS[u]["password"] == p:
                     st.session_state.admin_logged_app1 = True
                     st.session_state.qr_access_granted = True
-                    st.success("✅ Logged in!")
-                    st.rerun()
-                else:
-                    st.error("❌ Invalid credentials")
+                    st.success("✅ Logged in!"); st.rerun()
+                else: st.error("❌ Invalid credentials")
         st.stop()
 
-    # Load QR settings to check if location is required
+    # Load settings
     settings = load_qr_settings()
-    location_required = settings.get("location_enabled", False)
+    company = settings.get("company", "General")
+    loc_required = settings.get("location_enabled", False)
 
-    # Location check (only if admin enabled it)
-    if location_required and not st.session_state.location_verified:
-        st.success("✅ QR Code verified!")
+    # Location check (only if admin enabled it in smartapp)
+    if loc_required and not st.session_state.location_verified:
+        st.success("✅ QR verified!")
+        st.info(f"🏢 **Company:** {company}")
         st.markdown("### 📍 Location Verification Required")
-        st.info("Your admin has enabled location verification.\nYou must be within 500m of SNIST to mark attendance.")
+        st.info("Your admin has enabled location check.\nYou must be within 500m of SNIST.")
 
         if st.button("📍 Verify My Location", type="primary", key="loc_btn"):
             st.session_state.show_location_form = True
 
         if st.session_state.show_location_form:
-            st.markdown("---")
-            col1, col2 = st.columns(2)
-            with col1:
-                user_lat = st.number_input("Latitude", value=17.4553, format="%.6f", key="lat_input")
-            with col2:
-                user_lon = st.number_input("Longitude", value=78.6665, format="%.6f", key="lon_input")
-
-            if st.button("✅ Confirm Location", type="primary", key="confirm_loc"):
-                in_range, distance = check_location_in_range(user_lat, user_lon)
-                if in_range:
+            c1, c2 = st.columns(2)
+            with c1: user_lat = st.number_input("Latitude", value=17.4553, format="%.6f", key="lat")
+            with c2: user_lon = st.number_input("Longitude", value=78.6665, format="%.6f", key="lon")
+            if st.button("✅ Confirm Location", type="primary", key="conf_loc"):
+                ok, dist = in_range(user_lat, user_lon)
+                if ok:
                     st.session_state.location_verified = True
-                    st.success(f"✅ Location verified! You are {int(distance)}m from college.")
-                    st.rerun()
+                    st.success(f"✅ Location verified! {int(dist)}m from college."); st.rerun()
                 else:
-                    st.error(f"❌ You are {int(distance)}m away. Must be within {ALLOWED_RADIUS_METERS}m of SNIST.")
+                    st.error(f"❌ {int(dist)}m away. Must be within {RADIUS_M}m of SNIST.")
         st.stop()
 
-    # All checks passed - show portal
-    if location_required:
-        st.success("✅ QR & Location verified!")
-    else:
-        st.success("✅ QR Code verified!")
+    if loc_required: st.success("✅ QR & Location verified!")
+    else: st.success("✅ QR Code verified!")
 
-    qr_student_portal()
+    student_portal(company)
 
 if __name__ == "__main__":
     main()
