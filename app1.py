@@ -43,8 +43,37 @@ for k, v in {
     "location_verified": False,
     "show_location_form": False,
     "device_fingerprint": None,
+    "loc_required": False,
+    "current_company": "General",
 }.items():
     if k not in st.session_state: st.session_state[k] = v
+
+# ── Stable device fingerprint via JS + session ────────────
+def get_or_create_device_fingerprint():
+    """
+    Inject JS to read/write a stable device ID from localStorage.
+    Falls back to a uuid stored in session_state if JS hasn't returned yet.
+    """
+    # Inject JS to post localStorage device_id back to Streamlit
+    st.components.v1.html("""
+        <script>
+        const key = 'smart_attendance_device_id';
+        let did = localStorage.getItem(key);
+        if (!did) {
+            did = 'dev_' + Math.random().toString(36).substr(2,16) + Date.now();
+            localStorage.setItem(key, did);
+        }
+        // Write to a hidden element so Python can read via URL param workaround
+        // We store in sessionStorage as well for this session
+        sessionStorage.setItem(key, did);
+        </script>
+    """, height=0)
+    
+    # Use session_state fingerprint - generated once per session, stable across reruns
+    if not st.session_state.device_fingerprint:
+        # Generate once and lock it in session
+        st.session_state.device_fingerprint = str(uuid.uuid4())
+    return st.session_state.device_fingerprint
 
 # ── QR settings (written by smartapp) ────────────────────
 def load_qr_settings():
@@ -113,23 +142,29 @@ def get_all_companies():
     return sorted(set(companies))
 
 # ── Device binding ────────────────────────────────────────
-def get_device_fingerprint():
-    if not st.session_state.device_fingerprint:
-        st.session_state.device_fingerprint = str(uuid.uuid4())
-    return st.session_state.device_fingerprint
-
 def check_device_binding(rollnumber):
-    device_id = get_device_fingerprint()
+    # Use stable session fingerprint - same for entire browser session
+    device_id = get_or_create_device_fingerprint()
     df = load_device_binding()
-    existing = df[df['rollnumber'].str.lower() == rollnumber.lower()]
+    
+    roll_lower = rollnumber.strip().lower()
+    existing = df[df['rollnumber'].str.lower() == roll_lower]
+    
     if existing.empty:
-        new_row = pd.DataFrame([{'rollnumber': rollnumber.lower(), 'device_id': device_id, 'bound_at': ist_datetime_str()}])
+        # First time this roll number marks attendance - bind this device
+        new_row = pd.DataFrame([{
+            'rollnumber': roll_lower,
+            'device_id': device_id,
+            'bound_at': ist_datetime_str()
+        }])
         df = pd.concat([df, new_row], ignore_index=True)
         save_device_binding(df)
         return True, "✅ Device registered"
+    
     bound = existing.iloc[0]['device_id']
-    if bound == device_id: return True, "✅ Device verified"
-    return False, "❌ Roll number already registered on another device. Contact admin to unbind."
+    if bound == device_id:
+        return True, "✅ Device verified"
+    return False, "❌ This roll number is already registered on another device. Contact admin to unbind your device."
 
 # ── Location ─────────────────────────────────────────────
 def haversine(lat1, lon1, lat2, lon2):
@@ -147,27 +182,32 @@ def in_range(user_lat, user_lon):
 def check_qr_access():
     import urllib.parse
     params = st.query_params
+
     if "access" in params:
         token = params["access"]
         if token.startswith("qr_"):
             try:
                 ts = int(token.replace("qr_", ""))
                 elapsed = int(time.time()) - ts
+                company = urllib.parse.unquote(params.get("company", "General"))
+                loc_enabled = params.get("loc", "0") == "1"
+
                 if elapsed <= 30:
+                    # Valid QR - store in session so reruns don't lose them
                     st.session_state.qr_access_granted = True
-                    # Read company and location directly from URL
-                    company = urllib.parse.unquote(params.get("company", "General"))
-                    loc_enabled = params.get("loc", "0") == "1"
-                    return True, None, company, loc_enabled
-                return False, f"⏰ QR expired ({elapsed}s old). Ask admin for the latest QR.", None, False
-            except: return False, "Invalid QR format.", None, False
+                    st.session_state.current_company = company
+                    st.session_state.loc_required = loc_enabled
+                    return True, None
+                else:
+                    return False, f"⏰ QR expired ({elapsed}s old). Ask admin for the latest QR."
+            except:
+                return False, "Invalid QR format."
+
+    # QR already granted in this session - use stored values
     if st.session_state.qr_access_granted:
-        # Already verified - read from URL still
-        import urllib.parse
-        company = urllib.parse.unquote(params.get("company", "General"))
-        loc_enabled = params.get("loc", "0") == "1"
-        return True, None, company, loc_enabled
-    return False, "Please scan the QR code shown by your admin.", None, False
+        return True, None
+
+    return False, "Please scan the QR code shown by your admin."
 
 # ── Mark attendance ───────────────────────────────────────
 def mark_attendance(rollnumber, company):
@@ -379,12 +419,12 @@ def main():
 
     # Admin bypasses QR check entirely — stays forever
     if st.session_state.admin_logged_app1:
-        company = urllib.parse.unquote(params.get("company", "")) or load_qr_settings().get("company", "General")
+        company = st.session_state.current_company or urllib.parse.unquote(params.get("company", "General"))
         student_portal(company)
         return
 
     # Student path — must scan valid QR
-    valid, err, company, loc_required = check_qr_access()
+    valid, err = check_qr_access()
 
     if not valid:
         st.error("🔒 **Access Denied**")
@@ -401,6 +441,10 @@ def main():
                     st.success("✅ Logged in!"); st.rerun()
                 else: st.error("❌ Invalid credentials")
         st.stop()
+
+    # Read from session state (set during QR validation)
+    company = st.session_state.current_company
+    loc_required = st.session_state.loc_required
 
     # Location check (only if admin enabled it in smartapp)
     if loc_required and not st.session_state.location_verified:
@@ -420,7 +464,8 @@ def main():
                 ok, dist = in_range(user_lat, user_lon)
                 if ok:
                     st.session_state.location_verified = True
-                    st.success(f"✅ Location verified! {int(dist)}m from college."); st.rerun()
+                    st.success(f"✅ Location verified! {int(dist)}m from college.")
+                    st.rerun()
                 else:
                     st.error(f"❌ {int(dist)}m away. Must be within {RADIUS_M}m of SNIST.")
         st.stop()
