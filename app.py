@@ -109,8 +109,10 @@ def save_qr_settings(location_enabled, window_seconds, company):
                    "company": company,
                    "updated_at": ist_datetime_str()}, f)
 
-def make_qr(token):
-    url = f"https://smartapp12.streamlit.app?access={token}"
+def make_qr(token, company, loc_enabled):
+    import urllib.parse
+    company_encoded = urllib.parse.quote(company)
+    url = f"https://smartapp12.streamlit.app?access={token}&company={company_encoded}&loc={1 if loc_enabled else 0}"
     qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
     qr.add_data(url); qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
@@ -228,7 +230,8 @@ def admin_panel():
                     "qr_active": True, "qr_start_time": ts,
                     "qr_window_seconds": sel_secs, "qr_location_enabled": loc_enabled,
                     "qr_company": sel_company, "qr_token": token,
-                    "qr_image": make_qr(token), "qr_last_refresh": ts,
+                    "qr_image": make_qr(token, sel_company, loc_enabled),
+                    "qr_last_refresh": ts,
                 })
                 log_action("start_qr", f"{sel_company} | {sel_time} | loc:{loc_enabled}")
                 st.rerun()
@@ -252,7 +255,7 @@ def admin_panel():
             if since_refresh >= 30:
                 new_token = f"qr_{now}"
                 st.session_state.qr_token = new_token
-                st.session_state.qr_image = make_qr(new_token)
+                st.session_state.qr_image = make_qr(new_token, st.session_state.qr_company, st.session_state.qr_location_enabled)
                 st.session_state.qr_last_refresh = now
                 log_action("qr_refresh", st.session_state.qr_company)
 
@@ -269,7 +272,10 @@ def admin_panel():
                 st.metric("⏱️ Session Remaining", f"{m}m {s}s")
                 st.metric("🔄 Next QR in", f"{next_in}s")
                 st.info(f"🏢 **{st.session_state.qr_company}**")
-                st.success("📍 ON") if st.session_state.qr_location_enabled else st.info("📍 OFF")
+                if st.session_state.qr_location_enabled:
+                    st.success("📍 ON")
+                else:
+                    st.info("📍 OFF")
                 st.caption("Auto-refreshes every 30s ✅")
 
             time.sleep(1); st.rerun()
@@ -312,7 +318,10 @@ def admin_panel():
             today = ist_date_str()
             today_df = df[df['datestamp'] == today] if not df.empty else pd.DataFrame()
 
-            st.success(f"📅 Today ({today}) — **{len(today_df)} present**") if not today_df.empty else st.info("No attendance today.")
+            if not today_df.empty:
+                st.success(f"📅 Today ({today}) — **{len(today_df)} present**")
+            else:
+                st.info("No attendance today.")
             if not today_df.empty:
                 st.dataframe(today_df, width=1000)
                 st.download_button("⬇️ Today's", today_df.to_csv(index=False).encode(), f"att_{sc}_{today}.csv", "text/csv", key="dl_td")
