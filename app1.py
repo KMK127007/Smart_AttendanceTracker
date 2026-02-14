@@ -2,7 +2,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 from datetime import datetime, date, timezone, timedelta
-import time, os, warnings
+import time, os, warnings, hashlib
 from pathlib import Path
 from math import radians, sin, cos, sqrt, atan2
 
@@ -39,16 +39,25 @@ def local_css():
 
 local_css()
 
+# ── Session state ─────────────────────────────────────────
 for k, v in {
     "admin_logged_app1": False,
     "qr_access_granted": False,
     "location_verified": False,
-    "location_blocked": False,
     "current_company": "General",
     "loc_required": False,
-    "device_id": None,
+    "device_id": None,           # set once per session, never changes
 }.items():
     if k not in st.session_state: st.session_state[k] = v
+
+# ── Generate stable device ID once per session ────────────
+# Generated on FIRST run, stored in session_state permanently
+# Same browser session = same ID. New tab/device = new session = new ID.
+import uuid as _uuid
+if st.session_state.device_id is None:
+    st.session_state.device_id = "SES_" + _uuid.uuid4().hex[:20].upper()
+# Always read from session_state - NEVER use a module-level variable
+# so it's always available on every rerun
 
 # ── Helpers ───────────────────────────────────────────────
 def load_students():
@@ -119,17 +128,35 @@ def in_range(user_lat, user_lon):
 def check_device_binding(rollnumber, device_id):
     if not device_id:
         return False, "❌ Device ID not found. Please refresh the page."
+
     df = load_device_binding()
     roll_lower = rollnumber.strip().lower()
-    existing = df[df['rollnumber'].str.lower() == roll_lower]
-    if existing.empty:
-        new_row = pd.DataFrame([{'rollnumber': roll_lower, 'device_id': device_id, 'bound_at': ist_datetime_str()}])
+
+    # ── Check 1: Is this DEVICE already bound to someone else? ──
+    device_existing = df[df['device_id'] == device_id]
+    if not device_existing.empty:
+        bound_roll = device_existing.iloc[0]['rollnumber']
+        if bound_roll != roll_lower:
+            return False, f"❌ This device is already registered to another student ({bound_roll.upper()}). One device can only be used by one student."
+
+    # ── Check 2: Is this ROLL NUMBER already bound to a different device? ──
+    roll_existing = df[df['rollnumber'].str.lower() == roll_lower]
+    if not roll_existing.empty:
+        bound_device = roll_existing.iloc[0]['device_id']
+        if bound_device != device_id:
+            return False, "❌ Your roll number is already registered on a different device. Contact admin to unbind."
+
+    # ── Both checks passed - bind if not already bound ──
+    if roll_existing.empty:
+        new_row = pd.DataFrame([{
+            'rollnumber': roll_lower,
+            'device_id': device_id,
+            'bound_at': ist_datetime_str()
+        }])
         df = pd.concat([df, new_row], ignore_index=True)
         save_device_binding(df)
-        return True, "✅ Device registered"
-    bound = existing.iloc[0]['device_id']
-    if bound == device_id: return True, "✅ Device verified"
-    return False, "❌ This roll number is already registered on another device. Contact admin to unbind."
+
+    return True, "✅ Device verified"
 
 # ── QR access check ───────────────────────────────────────
 def check_qr_access():
@@ -173,36 +200,17 @@ def mark_attendance(rollnumber, company, device_id):
     att_df.to_csv(att_csv(company), index=False)
     return True, "✅ Attendance marked successfully!"
 
-# ── JS: Auto GPS + Device ID on page load ─────────────────
-# This runs immediately when page loads - no button click needed
-# GPS result + device_id are injected into hidden Streamlit text inputs
-INIT_JS = """
+# ── JS: Auto GPS on page load (only if location required) ─
+GPS_JS = """
 <script>
 (function() {
-    // ── 1. Device ID from localStorage (stable across sessions) ──
-    var DEVICE_KEY = 'satt_device_id_v2';
-    var did = localStorage.getItem(DEVICE_KEY);
-    if (!did) {
-        did = 'DEV_' + Date.now().toString(36).toUpperCase() + 
-              Math.random().toString(36).substr(2,8).toUpperCase();
-        localStorage.setItem(DEVICE_KEY, did);
-    }
-
-    // ── 2. Write device_id to URL param (Streamlit can read it) ──
     var url = new URL(window.parent.location.href);
-    var needReload = false;
-
-    if (url.searchParams.get('device_id') !== did) {
-        url.searchParams.set('device_id', did);
-        needReload = true;
-    }
-
-    // ── 3. GPS: only fetch if loc=1 and not already in URL ──
     var locRequired = url.searchParams.get('loc') === '1';
     var hasGps = url.searchParams.has('gps_lat') && url.searchParams.has('gps_lon');
+    var hasErr  = url.searchParams.has('gps_err');
 
-    if (locRequired && !hasGps) {
-        // Get GPS first, then reload once with everything
+    // Only fetch GPS if location is required and not already fetched
+    if (locRequired && !hasGps && !hasErr) {
         if (navigator.geolocation) {
             navigator.geolocation.getCurrentPosition(
                 function(pos) {
@@ -212,7 +220,6 @@ INIT_JS = """
                     window.parent.location.href = url.toString();
                 },
                 function(err) {
-                    // GPS failed - reload with device_id only, show error in app
                     url.searchParams.set('gps_err', err.code);
                     window.parent.location.href = url.toString();
                 },
@@ -222,16 +229,13 @@ INIT_JS = """
             url.searchParams.set('gps_err', '99');
             window.parent.location.href = url.toString();
         }
-    } else if (needReload) {
-        // Just reload to add device_id
-        window.parent.location.href = url.toString();
     }
 })();
 </script>
 """
 
-def inject_init_js():
-    components.html(INIT_JS, height=0)
+def inject_gps_js():
+    components.html(GPS_JS, height=0)
 
 # ── Student portal ────────────────────────────────────────
 def student_portal(company, device_id):
@@ -379,23 +383,16 @@ def student_portal(company, device_id):
 def main():
     st.set_page_config(page_title="QR Attendance Portal", page_icon="📱", layout="centered")
 
-    # ── Inject JS immediately on every page load ──────────
-    # This auto-fetches device_id from localStorage and GPS if needed
-    inject_init_js()
+    # Inject GPS JS (only fires if loc=1 in URL and GPS not yet fetched)
+    inject_gps_js()
 
     params = st.query_params
     import urllib.parse
 
-    # ── Read device_id from URL (set by JS above) ─────────
-    url_device_id = params.get("device_id", None)
-    if url_device_id and not st.session_state.device_id:
-        st.session_state.device_id = url_device_id
-    device_id = st.session_state.device_id or url_device_id
-
-    # ── ADMIN PATH ────────────────────────────────────────
+    # Device ID is always available from session state
     if st.session_state.admin_logged_app1:
         company = st.session_state.current_company or urllib.parse.unquote(params.get("company","General"))
-        student_portal(company, device_id)
+        student_portal(company, st.session_state.device_id)
         return
 
     # ── STUDENT: QR check ─────────────────────────────────
@@ -428,18 +425,15 @@ def main():
         gps_lon = params.get("gps_lon", None)
 
         if gps_lat and gps_lon:
-            # GPS received - check if in range
             try:
                 user_lat = float(gps_lat)
                 user_lon = float(gps_lon)
                 user_acc = int(params.get("gps_acc", 999))
                 ok, dist = in_range(user_lat, user_lon)
-
                 if ok:
                     st.session_state.location_verified = True
-                    st.rerun()  # proceed to portal
+                    st.rerun()
                 else:
-                    # ❌ HARD BLOCK
                     st.error("🚫 **Location Blocked**")
                     st.markdown(f"""
                     You are **{int(dist)}m** away from SNIST.  
@@ -452,32 +446,30 @@ def main():
                 st.stop()
 
         elif gps_err:
-            # GPS error from JS
             err_msgs = {
-                "1": "❌ Location permission denied. Please enable location in your browser settings and scan again.",
+                "1": "❌ Location permission denied. Please enable location in browser settings and scan again.",
                 "2": "❌ Location unavailable. Please enable GPS on your device.",
-                "3": "❌ Location request timed out. Please ensure GPS is enabled and try again.",
+                "3": "❌ Location timed out. Ensure GPS is enabled and try again.",
                 "99": "❌ GPS not supported on this browser."
             }
             st.error(err_msgs.get(gps_err, "❌ Location error. Please try again."))
             st.stop()
 
         else:
-            # Waiting for GPS - JS is fetching in background
+            # GPS JS is running in background - show waiting screen
             st.info(f"🏢 **Company:** {company}")
             st.warning("📍 **Location verification required.**")
-            st.info("📡 Getting your location automatically... **Please allow location access when your browser asks.**")
-            # Show spinner while waiting
-            with st.spinner("Fetching your GPS location... this may take a few seconds"):
+            st.info("📡 **Getting your GPS automatically...**\n\nPlease **Allow** location access when your browser asks.")
+            with st.spinner("Fetching location... please wait"):
                 time.sleep(2)
-            st.rerun()  # rerun to check if GPS params have arrived
+            st.rerun()
 
     if loc_required:
         st.success("✅ QR & Location verified!")
     else:
         st.success("✅ QR Code verified!")
 
-    student_portal(company, device_id)
+    student_portal(company, st.session_state.device_id)
 
 if __name__ == "__main__":
     main()
