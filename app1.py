@@ -204,47 +204,60 @@ def in_range(user_lat, user_lon):
 def request_gps_location():
     """
     Inject JS to get real GPS from the browser.
-    GPS result is written to URL params so Streamlit can read it.
+    GPS result is written to URL params and page is reloaded.
     """
     gps_js = """
     <script>
     function getLocation() {
-        if (navigator.geolocation) {
-            document.getElementById('gps-status').innerText = '📡 Getting your location...';
-            navigator.geolocation.getCurrentPosition(
-                function(pos) {
-                    var lat = pos.coords.latitude.toFixed(7);
-                    var lon = pos.coords.longitude.toFixed(7);
-                    var acc = Math.round(pos.coords.accuracy);
-                    document.getElementById('gps-status').innerText = 
-                        '✅ Got location: ' + lat + ', ' + lon + ' (±' + acc + 'm)';
-                    // Update URL with coordinates
-                    var url = new URL(window.location.href);
-                    url.searchParams.set('gps_lat', lat);
-                    url.searchParams.set('gps_lon', lon);
-                    url.searchParams.set('gps_acc', acc);
-                    window.location.href = url.toString();
-                },
-                function(err) {
-                    document.getElementById('gps-status').innerText = 
-                        '❌ Location error: ' + err.message;
-                },
-                {enableHighAccuracy: true, timeout: 15000, maximumAge: 0}
-            );
-        } else {
-            document.getElementById('gps-status').innerText = '❌ GPS not supported.';
+        document.getElementById('gps-status').innerText = '📡 Getting your location... please wait';
+        document.getElementById('gps-status').style.color = '#ff8c00';
+
+        if (!navigator.geolocation) {
+            document.getElementById('gps-status').innerText = '❌ GPS not supported on this browser.';
+            return;
         }
+
+        navigator.geolocation.getCurrentPosition(
+            function(pos) {
+                var lat = pos.coords.latitude.toFixed(7);
+                var lon = pos.coords.longitude.toFixed(7);
+                var acc = Math.round(pos.coords.accuracy);
+
+                document.getElementById('gps-status').innerText = 
+                    '✅ Location found! Verifying... (' + lat + ', ' + lon + ')';
+                document.getElementById('gps-status').style.color = 'green';
+
+                // Build new URL keeping existing params and adding GPS coords
+                var url = new URL(window.parent.location.href);
+                url.searchParams.set('gps_lat', lat);
+                url.searchParams.set('gps_lon', lon);
+                url.searchParams.set('gps_acc', acc);
+
+                // Full page reload with coordinates in URL
+                window.parent.location.href = url.toString();
+            },
+            function(err) {
+                var msg = '❌ ';
+                if (err.code === 1) msg += 'Location permission denied. Please allow location access.';
+                else if (err.code === 2) msg += 'Location unavailable. Enable GPS on your device.';
+                else if (err.code === 3) msg += 'Location request timed out. Try again.';
+                else msg += err.message;
+                document.getElementById('gps-status').innerText = msg;
+                document.getElementById('gps-status').style.color = 'red';
+            },
+            {enableHighAccuracy: true, timeout: 20000, maximumAge: 0}
+        );
     }
     </script>
-    <div id="gps-status" style="color:#888; font-size:14px;">Ready to get location.</div>
-    <br/>
+    <div id="gps-status" style="font-size:15px; margin-bottom:10px;">Ready. Click the button below.</div>
     <button onclick="getLocation()" style="
-        background:#4CAF50; color:white; border:none; padding:12px 24px;
-        border-radius:8px; font-size:16px; cursor:pointer; width:100%;">
+        background:#4CAF50; color:white; border:none; padding:14px 24px;
+        border-radius:8px; font-size:16px; cursor:pointer; width:100%;
+        font-weight:bold;">
         📍 Get My Location Automatically
     </button>
     """
-    components.html(gps_js, height=100)
+    components.html(gps_js, height=120)
 
 # ── QR access check ───────────────────────────────────────
 def check_qr_access():
@@ -464,11 +477,11 @@ def student_portal(company):
 def location_verification_page(company):
     st.markdown('<div class="header">📍 Location Verification</div>', unsafe_allow_html=True)
     st.info(f"🏢 **Company:** {company}")
-    st.warning("Your admin has enabled location verification.\nYou must be physically present at SNIST (within 500m).")
+    st.warning("Your admin has enabled location verification. You must be physically present at SNIST (within 500m).")
 
     params = st.query_params
 
-    # Check if GPS coordinates came back from JS
+    # ── GPS coordinates received from JS ──
     if "gps_lat" in params and "gps_lon" in params:
         try:
             user_lat = float(params["gps_lat"])
@@ -477,37 +490,42 @@ def location_verification_page(company):
 
             ok, dist = in_range(user_lat, user_lon)
 
-            st.markdown(f"**Your coordinates:** {user_lat:.6f}, {user_lon:.6f} (±{user_acc}m)")
+            st.markdown(f"📡 **Your location:** `{user_lat:.6f}, {user_lon:.6f}` (±{user_acc}m accuracy)")
 
             if ok:
-                # ✅ Location verified - set flag and proceed
+                # ✅ Verified - set flag, clear GPS params, proceed
                 st.session_state.location_verified = True
                 st.success(f"✅ Location verified! You are **{int(dist)}m** from SNIST.")
+                # Clear GPS params from URL so it doesn't interfere
+                st.query_params.clear()
+                # Re-set QR access params
+                st.session_state.qr_access_granted = True
                 st.rerun()
             else:
-                # ❌ HARD BLOCK - wrong location
+                # ❌ HARD BLOCK
                 st.markdown(BLOCKED_STYLE, unsafe_allow_html=True)
                 st.markdown(f"""
                 <div class="blocked-box">
-                    <h2>🚫 Access Blocked</h2>
+                    <h2>🚫 Location Blocked</h2>
                     <p>You are <b>{int(dist)}m</b> away from SNIST.</p>
-                    <p>You must be within <b>{RADIUS_M}m</b> to mark attendance.</p>
-                    <p>Please come to college and try again.</p>
+                    <p>Required: within <b>{RADIUS_M}m</b></p>
+                    <p>Please come to college and scan again.</p>
                 </div>
                 """, unsafe_allow_html=True)
-                st.stop()  # ← HARD STOP - cannot proceed
+                st.stop()
         except Exception as e:
-            st.error(f"Error reading location: {e}")
+            st.error(f"Error reading GPS: {e}. Please try again.")
+            # Fall through to show button again
 
-    # Show GPS button
-    st.markdown("### Step 1: Allow Location Access")
-    st.info("Click the button below. Your browser will ask for location permission — click **Allow**.")
+    # ── Show GPS button ──
+    st.markdown("### 📍 Step 1: Allow Location Access")
+    st.info("Click the button below. Your browser will ask for location permission — tap **Allow**.")
     request_gps_location()
 
     st.markdown("---")
-    st.markdown("### Step 2: Wait for Verification")
-    st.info("After clicking the button and allowing location, the page will automatically verify your location.")
-    st.stop()  # ← Don't show portal until location verified
+    st.markdown("### ⏳ Step 2: Wait for Verification")
+    st.info("After allowing location, the page will reload automatically and verify your location.")
+    st.stop()
 
 # ── Main ──────────────────────────────────────────────────
 def main():
