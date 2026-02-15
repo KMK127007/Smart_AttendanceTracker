@@ -195,28 +195,24 @@ def mark_attendance(rollnumber, company, device_id):
 
 def gps_and_device_component():
     """
-    Renders two hidden text inputs.
-    JS reads localStorage for device_id and browser GPS for location.
-    Both are written into the hidden inputs → Streamlit reads them.
-    Returns (device_id, lat, lon, gps_error)
+    Hidden inputs for device_id (from localStorage) and GPS coords.
+    JS writes values → Python reads them.
     """
-    # Hide the inputs visually
     st.markdown("""
     <style>
-    [data-testid="stTextInput"]:has(input[aria-label="__did__"]),
-    [data-testid="stTextInput"]:has(input[aria-label="__glat__"]),
-    [data-testid="stTextInput"]:has(input[aria-label="__glon__"]),
-    [data-testid="stTextInput"]:has(input[aria-label="__gerr__"]) {
-        height: 0 !important; overflow: hidden !important;
-        margin: 0 !important; padding: 0 !important;
+    div[data-testid="stTextInput"]:has(> div > div > input[placeholder="__did__"]),
+    div[data-testid="stTextInput"]:has(> div > div > input[placeholder="__glat__"]),
+    div[data-testid="stTextInput"]:has(> div > div > input[placeholder="__glon__"]),
+    div[data-testid="stTextInput"]:has(> div > div > input[placeholder="__gerr__"]) {
+        display: none !important;
     }
     </style>
     """, unsafe_allow_html=True)
 
-    did_val  = st.text_input("d", key="__did__",  label_visibility="collapsed")
-    lat_val  = st.text_input("a", key="__glat__", label_visibility="collapsed")
-    lon_val  = st.text_input("b", key="__glon__", label_visibility="collapsed")
-    err_val  = st.text_input("c", key="__gerr__", label_visibility="collapsed")
+    did_val  = st.text_input("d", placeholder="__did__",  key="__did__",  label_visibility="collapsed")
+    lat_val  = st.text_input("a", placeholder="__glat__", key="__glat__", label_visibility="collapsed")
+    lon_val  = st.text_input("b", placeholder="__glon__", key="__glon__", label_visibility="collapsed")
+    err_val  = st.text_input("c", placeholder="__gerr__", key="__gerr__", label_visibility="collapsed")
 
     # JS that fires immediately, populates the hidden inputs and triggers rerun
     js_code = f"""
@@ -226,11 +222,10 @@ def gps_and_device_component():
         var already_have_gps = {str(bool(st.session_state.gps_lat)).lower()};
         var already_have_did = {str(bool(st.session_state.device_id)).lower()};
 
-        function setInput(ariaLabel, value) {{
-            // Find the input by its aria-label (Streamlit sets this from key)
+        function setInput(placeholder, value) {{
             var inputs = window.parent.document.querySelectorAll('input');
             for (var i = 0; i < inputs.length; i++) {{
-                if (inputs[i].getAttribute('aria-label') === ariaLabel) {{
+                if (inputs[i].getAttribute('placeholder') === placeholder) {{
                     var setter = Object.getOwnPropertyDescriptor(
                         window.HTMLInputElement.prototype, 'value').set;
                     setter.call(inputs[i], value);
@@ -426,25 +421,6 @@ def main():
         student_portal(company, st.session_state.device_id)
         return
 
-    # ── Get device_id + GPS via hidden inputs ─────────────
-    # This runs on EVERY load - fills device_id and GPS into session state
-    did_val, lat_val, lon_val, err_val = gps_and_device_component()
-
-    # Store device_id from localStorage (permanent)
-    if did_val and not st.session_state.device_id:
-        st.session_state.device_id = did_val
-        st.rerun()
-
-    # Store GPS result (if location required)
-    if st.session_state.loc_required and not st.session_state.gps_lat:
-        if lat_val and lon_val:
-            st.session_state.gps_lat = float(lat_val)
-            st.session_state.gps_lon = float(lon_val)
-            st.rerun()
-        elif err_val:
-            st.session_state.gps_error = err_val
-            st.rerun()
-
     # ── STUDENT: QR check ────────────────────────────────
     valid, err = check_qr_access()
 
@@ -463,6 +439,25 @@ def main():
                     st.success("✅ Logged in!"); st.rerun()
                 else: st.error("❌ Invalid credentials")
         st.stop()
+
+    # ── QR valid — now get device_id + GPS via hidden inputs ─
+    # Only runs when student has scanned a valid QR
+    did_val, lat_val, lon_val, err_val = gps_and_device_component()
+
+    # Store device_id from localStorage (permanent across refreshes)
+    if did_val and not st.session_state.device_id:
+        st.session_state.device_id = did_val
+        st.rerun()
+
+    # Store GPS result (if location required)
+    if st.session_state.loc_required and not st.session_state.gps_lat:
+        if lat_val and lon_val:
+            st.session_state.gps_lat = float(lat_val)
+            st.session_state.gps_lon = float(lon_val)
+            st.rerun()
+        elif err_val:
+            st.session_state.gps_error = err_val
+            st.rerun()
 
     company      = st.session_state.current_company
     loc_required = st.session_state.loc_required
