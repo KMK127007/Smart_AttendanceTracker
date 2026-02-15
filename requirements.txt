@@ -8,6 +8,8 @@ requests
 qrcode[pil]
 Pillow
 supabase
+streamlit-js-eval==0.1.7
+
 
 
 
