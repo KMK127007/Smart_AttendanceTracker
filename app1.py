@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 from datetime import datetime, date, timezone, timedelta
 import time, os, warnings, urllib.parse
@@ -316,7 +315,7 @@ def student_portal(company, device_id):
             st.markdown("### ✍️ Manual Entry")
             students = load_students()
             man_roll = st.selectbox("Roll Number:",[""] + students['rollnumber'].tolist(), key="man_roll_sel") if not students.empty else st.text_input("Roll Number:", key="man_roll_txt")
-            mode = st.radio("Company:", ["Select Existing","Enter New"], horizontal=True, key="man_comp_mode")
+            mode = st.radio("Company:", ["Select Existing","Enter New"], horizontal=True, key="man_comp_mode", label_visibility="collapsed")
             all_comps = get_all_companies(); man_company = None
             if mode=="Select Existing":
                 if all_comps: man_company = st.selectbox("Select:", all_comps, key="man_comp_sel")
@@ -357,34 +356,11 @@ def main():
     st.set_page_config(page_title="QR Attendance Portal", page_icon="📱", layout="centered")
     params = st.query_params
 
-    # ── Read device_id from URL (set by QR scan URL or localStorage redirect)
-    # Device ID is passed in the URL as ?did=... 
-    url_did = params.get("did", None)
-    if url_did and not st.session_state.device_id:
-        st.session_state.device_id = url_did
-
-    # If still no device_id, inject JS to get from localStorage and redirect back
+    # Device ID: stable UUID for this browser session
+    # Single-entry enforcement is done by the attendance CSV check (not device alone)
     if not st.session_state.device_id:
-        # Get current URL params to preserve them
-        current_params = {k: params.get(k, "") for k in params.keys()}
-        params_to_keep = "&".join([f"{k}={urllib.parse.quote(str(v))}" for k,v in current_params.items() if k != 'did'])
-        
-        components.html(f"""
-        <script>
-        var KEY = 'satt_did_v3';
-        var did = localStorage.getItem(KEY);
-        if (!did) {{
-            did = 'DV' + Date.now().toString(36) + Math.random().toString(36).substr(2,8);
-            localStorage.setItem(KEY, did);
-        }}
-        var base = window.top.location.href.split('?')[0];
-        var existing = "{params_to_keep}";
-        var sep = existing ? '&' : '';
-        window.top.location.href = base + '?' + existing + sep + 'did=' + did;
-        </script>
-        <p style="color:#888; text-align:center; padding:20px;">Loading...</p>
-        """, height=60)
-        st.stop()
+        import uuid
+        st.session_state.device_id = "SES_" + uuid.uuid4().hex[:20].upper()
 
     # ── ADMIN: no checks, stays forever ──────────────────
     if st.session_state.admin_logged_app1:
