@@ -2,12 +2,20 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 from datetime import datetime, date, timezone, timedelta
-import time, os, warnings
+import time, os, warnings, urllib.parse
 from pathlib import Path
 from math import radians, sin, cos, sqrt, atan2
 
 warnings.filterwarnings('ignore')
 os.environ["PYTHONWARNINGS"] = "ignore"
+
+# streamlit-js-eval: reliable JS execution in Streamlit
+# Add to requirements.txt: streamlit-js-eval==0.1.7
+try:
+    from streamlit_js_eval import get_geolocation
+    JS_EVAL_AVAILABLE = True
+except ImportError:
+    JS_EVAL_AVAILABLE = False
 
 IST = timezone(timedelta(hours=5, minutes=30))
 def ist_now():          return datetime.now(IST)
@@ -39,7 +47,6 @@ def local_css():
 
 local_css()
 
-# ── Session state ─────────────────────────────────────────
 for k, v in {
     "admin_logged_app1": False,
     "qr_access_granted": False,
@@ -49,7 +56,6 @@ for k, v in {
     "device_id": None,
     "gps_lat": None,
     "gps_lon": None,
-    "gps_error": None,
 }.items():
     if k not in st.session_state: st.session_state[k] = v
 
@@ -59,7 +65,7 @@ def load_students():
         df = pd.read_csv(STUDENTS_CSV)
         if 'rollnumber' not in df.columns:
             for col in df.columns:
-                if 'roll' in col.lower(): return df.rename(columns={col: 'rollnumber'})
+                if 'roll' in col.lower(): return df.rename(columns={col:'rollnumber'})
         return df
     except: return pd.DataFrame(columns=["rollnumber"])
 
@@ -106,11 +112,10 @@ def get_all_companies():
         companies.append(st.session_state.current_company)
     return sorted(set(companies))
 
-# ── Haversine ─────────────────────────────────────────────
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371000
     lat1,lon1,lat2,lon2 = map(radians,[lat1,lon1,lat2,lon2])
-    dlat,dlon = lat2-lat1, lon2-lon1
+    dlat,dlon = lat2-lat1,lon2-lon1
     a = sin(dlat/2)**2 + cos(lat1)*cos(lat2)*sin(dlon/2)**2
     return R * 2 * atan2(sqrt(a), sqrt(1-a))
 
@@ -118,32 +123,26 @@ def in_range(user_lat, user_lon):
     d = haversine(COLLEGE_LAT, COLLEGE_LON, user_lat, user_lon)
     return d <= RADIUS_M, d
 
-# ── Device binding ────────────────────────────────────────
 def check_device_binding(rollnumber, device_id):
     if not device_id:
         return False, "❌ Device ID missing. Please refresh."
     df = load_device_binding()
     roll_lower = rollnumber.strip().lower()
-
     device_rows = df[df['device_id'] == device_id]
     if not device_rows.empty:
         bound_roll = device_rows.iloc[0]['rollnumber'].lower()
         if bound_roll != roll_lower:
             return False, f"❌ This device is already used by **{bound_roll.upper()}**. One device = one student only."
         return True, "ok"
-
     roll_rows = df[df['rollnumber'].str.lower() == roll_lower]
     if not roll_rows.empty:
         return False, "❌ Your roll number is already registered on a different device. Contact admin to unbind."
-
     new_row = pd.DataFrame([{'rollnumber': roll_lower, 'device_id': device_id, 'bound_at': ist_datetime_str()}])
     df = pd.concat([df, new_row], ignore_index=True)
     save_device_binding(df)
     return True, "ok"
 
-# ── QR access check ───────────────────────────────────────
 def check_qr_access():
-    import urllib.parse
     params = st.query_params
     if "access" in params:
         token = params["access"]
@@ -163,7 +162,6 @@ def check_qr_access():
     if st.session_state.qr_access_granted: return True, None
     return False, "Please scan the QR code shown by your admin."
 
-# ── Mark attendance ───────────────────────────────────────
 def mark_attendance(rollnumber, company, device_id):
     students = load_students()
     if students.empty or 'rollnumber' not in students.columns:
@@ -171,109 +169,56 @@ def mark_attendance(rollnumber, company, device_id):
     students['rollnumber'] = students['rollnumber'].astype(str).str.strip()
     if students[students['rollnumber'].str.lower() == rollnumber.strip().lower()].empty:
         return False, f"❌ Roll number '{rollnumber}' not found."
-
     ok, msg = check_device_binding(rollnumber, device_id)
     if not ok: return False, msg
-
     att_df = load_attendance(company)
     if not att_df.empty:
         already = att_df[att_df['rollnumber'].str.lower() == rollnumber.strip().lower()]
         if not already.empty:
             return False, f"⚠️ Attendance already marked for {company} (on {already.iloc[0]['datestamp']})."
-
     today = ist_date_str()
     new = pd.DataFrame([{'rollnumber': rollnumber.strip(), 'timestamp': ist_time_str(), 'datestamp': today, 'company': company}])
     att_df = pd.concat([att_df, new], ignore_index=True)
     att_df.to_csv(att_csv(company), index=False)
     return True, "✅ Attendance marked successfully!"
 
-# ── GPS via st.text_input + JS (FAST & RELIABLE) ─────────
-# Key insight: Streamlit text_input is the only reliable way to pass
-# data from JS to Python. We hide it visually and auto-populate via JS.
-# GPS uses maximumAge:0 + timeout:5000 for fresh reading.
-# Device ID uses localStorage — permanent across refreshes.
-
-def gps_and_device_component():
+# ── GPS page: full visible component, updates URL directly ─
+# This is rendered as its own full screen - no iframe blocking issues
+# The component has height=400 so it's a real visible element
+# JS runs inside the component iframe, but uses window.top to navigate
+def check_location_with_js_eval(company):
     """
-    Hidden inputs for device_id (from localStorage) and GPS coords.
-    JS writes values → Python reads them.
+    Uses streamlit-js-eval to get GPS directly - no iframe, no URL hacks.
+    Returns True if verified, False if blocked, None if still waiting.
     """
-    st.markdown("""
-    <style>
-    div[data-testid="stTextInput"]:has(> div > div > input[placeholder="__did__"]),
-    div[data-testid="stTextInput"]:has(> div > div > input[placeholder="__glat__"]),
-    div[data-testid="stTextInput"]:has(> div > div > input[placeholder="__glon__"]),
-    div[data-testid="stTextInput"]:has(> div > div > input[placeholder="__gerr__"]) {
-        display: none !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+    st.info(f"🏢 **Company:** {company}")
+    st.warning("📍 **Location verification required.**")
+    st.info("Tap the button below. Allow location when your browser asks.")
 
-    did_val  = st.text_input("d", placeholder="__did__",  key="__did__",  label_visibility="collapsed")
-    lat_val  = st.text_input("a", placeholder="__glat__", key="__glat__", label_visibility="collapsed")
-    lon_val  = st.text_input("b", placeholder="__glon__", key="__glon__", label_visibility="collapsed")
-    err_val  = st.text_input("c", placeholder="__gerr__", key="__gerr__", label_visibility="collapsed")
+    if st.button("📍 Verify My Location", type="primary", key="gps_btn"):
+        with st.spinner("Getting your location (2-5 seconds)..."):
+            try:
+                loc = get_geolocation()
+                if loc and "coords" in loc:
+                    lat = loc["coords"]["latitude"]
+                    lon = loc["coords"]["longitude"]
+                    ok, dist = in_range(lat, lon)
+                    if ok:
+                        st.session_state.location_verified = True
+                        st.session_state.gps_lat = lat
+                        st.session_state.gps_lon = lon
+                        st.success(f"✅ Location verified! {int(dist)}m from SNIST.")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"🚫 **Blocked** — You are {int(dist)}m away. Must be within {RADIUS_M}m of SNIST.")
+                        st.stop()
+                else:
+                    st.error("❌ Could not get location. Please allow location access and try again.")
+            except Exception as e:
+                st.error(f"❌ Location error: {str(e)}. Please enable GPS and try again.")
+    st.stop()
 
-    # JS that fires immediately, populates the hidden inputs and triggers rerun
-    js_code = f"""
-    <script>
-    (function() {{
-        var loc_required = {str(st.session_state.loc_required).lower()};
-        var already_have_gps = {str(bool(st.session_state.gps_lat)).lower()};
-        var already_have_did = {str(bool(st.session_state.device_id)).lower()};
-
-        function setInput(placeholder, value) {{
-            var inputs = window.parent.document.querySelectorAll('input');
-            for (var i = 0; i < inputs.length; i++) {{
-                if (inputs[i].getAttribute('placeholder') === placeholder) {{
-                    var setter = Object.getOwnPropertyDescriptor(
-                        window.HTMLInputElement.prototype, 'value').set;
-                    setter.call(inputs[i], value);
-                    inputs[i].dispatchEvent(new Event('input', {{bubbles: true}}));
-                    return true;
-                }}
-            }}
-            return false;
-        }}
-
-        // Step 1: Device ID from localStorage
-        if (!already_have_did) {{
-            var KEY = 'satt_did_v3';
-            var did = localStorage.getItem(KEY);
-            if (!did) {{
-                did = 'DV' + Date.now().toString(36) + Math.random().toString(36).substr(2,8);
-                localStorage.setItem(KEY, did);
-            }}
-            setInput('__did__', did);
-        }}
-
-        // Step 2: GPS (only if location required and not yet fetched)
-        if (loc_required && !already_have_gps) {{
-            if (!navigator.geolocation) {{
-                setInput('__gerr__', '99');
-                return;
-            }}
-            navigator.geolocation.getCurrentPosition(
-                function(pos) {{
-                    setInput('__glat__', pos.coords.latitude.toFixed(6));
-                    setInput('__glon__', pos.coords.longitude.toFixed(6));
-                }},
-                function(err) {{
-                    setInput('__gerr__', String(err.code));
-                }},
-                {{
-                    enableHighAccuracy: false,
-                    timeout: 5000,
-                    maximumAge: 30000
-                }}
-            );
-        }}
-    }})();
-    </script>
-    """
-    components.html(js_code, height=0)
-
-    return did_val or None, lat_val or None, lon_val or None, err_val or None
 
 # ── Student portal ────────────────────────────────────────
 def student_portal(company, device_id):
@@ -284,9 +229,8 @@ def student_portal(company, device_id):
     roll = st.text_input("Roll Number", key="qr_roll", placeholder="e.g. 22311a1965")
     if st.button("✅ Mark Attendance", type="primary", key="mark_btn"):
         if roll.strip():
-            active_device = st.session_state.device_id or device_id
             with st.spinner("Marking attendance..."):
-                ok, msg = mark_attendance(roll, company, active_device)
+                ok, msg = mark_attendance(roll, company, device_id)
             if ok:
                 st.success(msg); st.balloons()
                 st.info(f"**Roll:** {roll.strip()} | **Company:** {company} | **Time:** {ist_time_str()} | **Date:** {ist_date_str()}")
@@ -336,7 +280,7 @@ def student_portal(company, device_id):
                 except Exception as e: st.error(f"Error: {e}")
             cur = load_students()
             if not cur.empty:
-                st.markdown("---"); st.success(f"📋 **{len(cur)} students** in database"); st.dataframe(cur, width=700)
+                st.markdown("---"); st.success(f"📋 **{len(cur)} students**"); st.dataframe(cur, width=700)
 
         with admin_tabs[1]:
             today = ist_date_str()
@@ -411,9 +355,36 @@ def student_portal(company, device_id):
 # ── Main ──────────────────────────────────────────────────
 def main():
     st.set_page_config(page_title="QR Attendance Portal", page_icon="📱", layout="centered")
-
-    import urllib.parse
     params = st.query_params
+
+    # ── Read device_id from URL (set by QR scan URL or localStorage redirect)
+    # Device ID is passed in the URL as ?did=... 
+    url_did = params.get("did", None)
+    if url_did and not st.session_state.device_id:
+        st.session_state.device_id = url_did
+
+    # If still no device_id, inject JS to get from localStorage and redirect back
+    if not st.session_state.device_id:
+        # Get current URL params to preserve them
+        current_params = {k: params.get(k, "") for k in params.keys()}
+        params_to_keep = "&".join([f"{k}={urllib.parse.quote(str(v))}" for k,v in current_params.items() if k != 'did'])
+        
+        components.html(f"""
+        <script>
+        var KEY = 'satt_did_v3';
+        var did = localStorage.getItem(KEY);
+        if (!did) {{
+            did = 'DV' + Date.now().toString(36) + Math.random().toString(36).substr(2,8);
+            localStorage.setItem(KEY, did);
+        }}
+        var base = window.top.location.href.split('?')[0];
+        var existing = "{params_to_keep}";
+        var sep = existing ? '&' : '';
+        window.top.location.href = base + '?' + existing + sep + 'did=' + did;
+        </script>
+        <p style="color:#888; text-align:center; padding:20px;">Loading...</p>
+        """, height=60)
+        st.stop()
 
     # ── ADMIN: no checks, stays forever ──────────────────
     if st.session_state.admin_logged_app1:
@@ -440,55 +411,16 @@ def main():
                 else: st.error("❌ Invalid credentials")
         st.stop()
 
-    # ── QR valid — now get device_id + GPS via hidden inputs ─
-    # Only runs when student has scanned a valid QR
-    did_val, lat_val, lon_val, err_val = gps_and_device_component()
-
-    # Store device_id from localStorage (permanent across refreshes)
-    if did_val and not st.session_state.device_id:
-        st.session_state.device_id = did_val
-        st.rerun()
-
-    # Store GPS result (if location required)
-    if st.session_state.loc_required and not st.session_state.gps_lat:
-        if lat_val and lon_val:
-            st.session_state.gps_lat = float(lat_val)
-            st.session_state.gps_lon = float(lon_val)
-            st.rerun()
-        elif err_val:
-            st.session_state.gps_error = err_val
-            st.rerun()
-
     company      = st.session_state.current_company
     loc_required = st.session_state.loc_required
 
     # ── Location check ────────────────────────────────────
     if loc_required and not st.session_state.location_verified:
-
-        if st.session_state.gps_lat and st.session_state.gps_lon:
-            # GPS received - verify distance
-            ok, dist = in_range(st.session_state.gps_lat, st.session_state.gps_lon)
-            if ok:
-                st.session_state.location_verified = True
-                st.rerun()
-            else:
-                st.error("🚫 **Location Blocked**")
-                st.markdown(f"You are **{int(dist)}m** away from SNIST. Must be within **{RADIUS_M}m**.")
-                st.stop()
-
-        elif st.session_state.gps_error:
-            msgs = {"1":"❌ Location permission denied. Enable location in browser settings.", "2":"❌ GPS unavailable. Enable GPS on device.", "3":"❌ GPS timed out. Enable GPS and try again.", "99":"❌ GPS not supported."}
-            st.error(msgs.get(st.session_state.gps_error, "❌ Location error."))
+        if not JS_EVAL_AVAILABLE:
+            st.error("❌ Location library not installed. Add `streamlit-js-eval==0.1.7` to requirements.txt")
             st.stop()
-
-        else:
-            # Still waiting for GPS from JS
-            st.info(f"🏢 **Company:** {company}")
-            st.warning("📍 **Verifying location...**")
-            st.info("Please **Allow** location access when your browser asks.")
-            with st.spinner("Getting location (2-5 seconds)..."):
-                time.sleep(1)
-            st.rerun()
+        check_location_with_js_eval(company)
+        return  # st.stop() is inside the function
 
     if loc_required:
         st.success("✅ QR & Location verified!")
