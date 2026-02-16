@@ -115,74 +115,70 @@ def admin_panel():
 
         # Stage 2
         st.markdown("#### ⚙️ Stage 2 — Configure Settings")
-        col_left, col_right = st.columns(2)
 
-        with col_left:
-            st.markdown("**⏱️ Time Window**")
-            time_opts = {"1 minute":60,"3 minutes":180,"5 minutes":300,"10 minutes":600,"15 minutes":900,"30 minutes":1800}
-            sel_time = st.selectbox("QR session duration:", list(time_opts.keys()), key="tw_sel")
-            sel_secs = time_opts[sel_time]
+        # Render location toggle FIRST (outside columns) so its value is available
+        # when we decide whether to show the refresh rate dropdown
+        st.markdown("**📍 Location Verification**")
+        loc_enabled = st.toggle("Enable Location Check", value=False, key="loc_toggle",
+                                help="Students must be within 500m of SNIST")
+        if loc_enabled:
+            st.success("📍 **ENABLED**")
+            st.info("📌 SNIST\nLat: 17.4558417\nLon: 78.6670873\nRadius: 500m")
+        else:
+            st.info("📍 **DISABLED** — Students mark from anywhere")
 
-            # QR Refresh Rate — shown only when location is enabled
-            # Read loc_toggle state to decide (it's in col_right but Streamlit renders both before display)
-            loc_enabled = st.session_state.get("loc_toggle", False)
+        st.markdown("---")
 
-            if loc_enabled:
-                st.markdown("**🔄 QR Refresh Rate**")
-                refresh_opts = {
-                    "60 seconds": 60,
-                    "90 seconds": 90,
-                    "2 minutes":  120,
-                    "3 minutes":  180,
-                    "5 minutes":  300,
-                }
-                sel_refresh_label = st.selectbox(
-                    "QR refresh interval (location ON):",
-                    list(refresh_opts.keys()),
-                    index=1,   # default: 90 seconds
-                    key="refresh_sel",
-                    help="Set higher when location verification is enabled (students need time to allow GPS)"
-                )
-                sel_refresh_secs = refresh_opts[sel_refresh_label]
-                st.caption(f"QR refreshes every **{sel_refresh_label}** — gives students enough time for location check")
+        st.markdown("**⏱️ Time Window**")
+        time_opts = {"1 minute":60,"3 minutes":180,"5 minutes":300,"10 minutes":600,"15 minutes":900,"30 minutes":1800}
+        sel_time = st.selectbox("QR session duration:", list(time_opts.keys()), key="tw_sel")
+        sel_secs = time_opts[sel_time]
+
+        if loc_enabled:
+            st.markdown("**🔄 QR Refresh Rate**")
+            refresh_opts = {
+                "60 seconds": 60,
+                "90 seconds": 90,
+                "2 minutes":  120,
+                "3 minutes":  180,
+                "5 minutes":  300,
+            }
+            sel_refresh_label = st.selectbox(
+                "QR refresh interval (location ON):",
+                list(refresh_opts.keys()),
+                index=0,   # default: 60 seconds
+                key="refresh_sel",
+            )
+            sel_refresh_secs = refresh_opts[sel_refresh_label]
+            st.caption(f"QR refreshes every **{sel_refresh_label}**")
+        else:
+            sel_refresh_secs = 30
+            st.caption(f"QR auto-refreshes every 30s within {sel_time}")
+
+        st.markdown("---")
+
+        st.markdown("**🏢 Company / Drive**")
+        companies = load_companies()
+        mode = st.radio("", ["Select Existing", "Create New"], horizontal=True, key="comp_mode")
+        sel_company = None
+
+        if mode == "Select Existing":
+            if companies:
+                sel_company = st.selectbox("Select:", companies, key="comp_sel")
             else:
-                sel_refresh_secs = 30  # default 30s when location is OFF
-                st.caption(f"QR auto-refreshes every 30s within {sel_time}")
+                st.warning("No companies yet. Switch to 'Create New'.")
 
-            st.markdown("---")
+        if mode == "Create New":
+            new_name = st.text_input("Company Name:", placeholder="e.g. TCS, Infosys", key="new_comp")
+            if new_name.strip():
+                sel_company = new_name.strip()
+                if st.button("➕ Save Company", key="save_comp"):
+                    add_company(new_name.strip())
+                    st.success(f"✅ '{new_name.strip()}' saved!")
+                    st.rerun()
 
-            st.markdown("**🏢 Company / Drive**")
-            companies = load_companies()
-            mode = st.radio("", ["Select Existing", "Create New"], horizontal=True, key="comp_mode")
-            sel_company = None
-
-            if mode == "Select Existing":
-                if companies:
-                    sel_company = st.selectbox("Select:", companies, key="comp_sel")
-                else:
-                    st.warning("No companies yet. Switch to 'Create New'.")
-
-            if mode == "Create New":
-                new_name = st.text_input("Company Name:", placeholder="e.g. TCS, Infosys", key="new_comp")
-                if new_name.strip():
-                    sel_company = new_name.strip()
-                    if st.button("➕ Save Company", key="save_comp"):
-                        add_company(new_name.strip())
-                        st.success(f"✅ '{new_name.strip()}' saved!")
-                        st.rerun()
-
-            if sel_company:
-                st.success(f"🏢 **{sel_company}**")
-
-        with col_right:
-            st.markdown("**📍 Location Verification**")
-            loc_enabled = st.toggle("Enable Location Check", value=False, key="loc_toggle",
-                                    help="Students must be within 500m of SNIST")
-            if loc_enabled:
-                st.success("📍 **ENABLED**")
-                st.info("📌 SNIST\nLat: 17.4558417\nLon: 78.6670873\nRadius: 500m")
-            else:
-                st.info("📍 **DISABLED**\nStudents mark from anywhere")
+        if sel_company:
+            st.success(f"🏢 **{sel_company}**")
 
         st.markdown("---")
 
