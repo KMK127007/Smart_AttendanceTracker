@@ -154,7 +154,7 @@ def admin_panel():
                                     help="Students must be within 500m of SNIST")
             if loc_enabled:
                 st.success("📍 **ENABLED**")
-                st.info("📌 SNIST\nLat: 17.4553223\nLon: 78.6664965\nRadius: 500m")
+                st.info("📌 SNIST\nLat: 17.4558417\nLon: 78.6670873\nRadius: 500m")
             else:
                 st.info("📍 **DISABLED**\nStudents mark from anywhere")
 
