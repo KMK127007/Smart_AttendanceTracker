@@ -40,6 +40,7 @@ for k, v in {
     "qr_window_seconds": 60, "qr_location_enabled": False,
     "qr_token": None, "qr_image": None,
     "qr_last_refresh": None, "qr_company": None,
+    "qr_refresh_seconds": 30,
 }.items():
     if k not in st.session_state: st.session_state[k] = v
 
@@ -121,7 +122,32 @@ def admin_panel():
             time_opts = {"1 minute":60,"3 minutes":180,"5 minutes":300,"10 minutes":600,"15 minutes":900,"30 minutes":1800}
             sel_time = st.selectbox("QR session duration:", list(time_opts.keys()), key="tw_sel")
             sel_secs = time_opts[sel_time]
-            st.caption(f"QR auto-refreshes every 30s within {sel_time}")
+
+            # QR Refresh Rate — shown only when location is enabled
+            # Read loc_toggle state to decide (it's in col_right but Streamlit renders both before display)
+            loc_enabled = st.session_state.get("loc_toggle", False)
+
+            if loc_enabled:
+                st.markdown("**🔄 QR Refresh Rate**")
+                refresh_opts = {
+                    "60 seconds": 60,
+                    "90 seconds": 90,
+                    "2 minutes":  120,
+                    "3 minutes":  180,
+                    "5 minutes":  300,
+                }
+                sel_refresh_label = st.selectbox(
+                    "QR refresh interval (location ON):",
+                    list(refresh_opts.keys()),
+                    index=1,   # default: 90 seconds
+                    key="refresh_sel",
+                    help="Set higher when location verification is enabled (students need time to allow GPS)"
+                )
+                sel_refresh_secs = refresh_opts[sel_refresh_label]
+                st.caption(f"QR refreshes every **{sel_refresh_label}** — gives students enough time for location check")
+            else:
+                sel_refresh_secs = 30  # default 30s when location is OFF
+                st.caption(f"QR auto-refreshes every 30s within {sel_time}")
 
             st.markdown("---")
 
@@ -155,6 +181,7 @@ def admin_panel():
             if loc_enabled:
                 st.success("📍 **ENABLED**")
                 st.info("📌 SNIST\nLat: 17.4558417\nLon: 78.6670873\nRadius: 500m")
+                st.warning(f"⚠️ Set refresh rate ≥ 60s so students have time to verify location")
             else:
                 st.info("📍 **DISABLED**\nStudents mark from anywhere")
 
@@ -176,13 +203,14 @@ def admin_panel():
                 st.session_state.update({
                     "qr_active": True, "qr_start_time": ts,
                     "qr_window_seconds": sel_secs,
+                    "qr_refresh_seconds": sel_refresh_secs,
                     "qr_location_enabled": loc_enabled,
                     "qr_company": sel_company,
                     "qr_token": token,
                     "qr_image": make_qr(token, sel_company, loc_enabled),
                     "qr_last_refresh": ts,
                 })
-                log_action("start_qr", f"{sel_company} | {sel_time} | loc:{loc_enabled}")
+                log_action("start_qr", f"{sel_company} | {sel_time} | loc:{loc_enabled} | refresh:{sel_refresh_secs}s")
                 st.rerun()
 
         with c2:
@@ -196,13 +224,14 @@ def admin_panel():
             now = int(time.time())
             total_elapsed = now - st.session_state.qr_start_time
             remaining = st.session_state.qr_window_seconds - total_elapsed
+            refresh_secs = st.session_state.get("qr_refresh_seconds", 30)
 
             if remaining <= 0:
                 st.error("⏰ Session expired. Start a new one.")
                 st.session_state.qr_active = False; st.rerun()
 
             since_refresh = now - st.session_state.qr_last_refresh
-            if since_refresh >= 30:
+            if since_refresh >= refresh_secs:
                 new_token = f"qr_{now}"
                 st.session_state.qr_token = new_token
                 st.session_state.qr_image = make_qr(new_token, st.session_state.qr_company, st.session_state.qr_location_enabled)
@@ -213,7 +242,7 @@ def admin_panel():
             st.markdown("### 📱 Active QR Code")
 
             m, s = int(remaining // 60), int(remaining % 60)
-            next_in = max(0, 30 - int(since_refresh))
+            next_in = max(0, refresh_secs - int(since_refresh))
 
             qr_col, info_col = st.columns([2, 1])
             with qr_col:
@@ -224,9 +253,10 @@ def admin_panel():
                 st.info(f"🏢 **{st.session_state.qr_company}**")
                 if st.session_state.qr_location_enabled:
                     st.success("📍 Location: ON")
+                    st.caption(f"Refresh every {refresh_secs}s ✅")
                 else:
                     st.info("📍 Location: OFF")
-                st.caption("Auto-refreshes every 30s ✅")
+                    st.caption("Refresh every 30s ✅")
 
             time.sleep(1); st.rerun()
 
