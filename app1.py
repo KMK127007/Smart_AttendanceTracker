@@ -308,7 +308,7 @@ def check_location_with_js_eval(company):
             st.session_state.gps_lon = lon
             st.rerun()
         else:
-            st.error(f"🚫 **Blocked** — You are **{int(dist)}m** away. Must be within **{RADIUS_M}m** of SNIST.")
+            st.error("🚫 Blocked — Location out of college.")
             st.stop()
     else:
         st.error("❌ Could not read location. Please try again.")
