@@ -29,8 +29,8 @@ try:
 except KeyError as e:
     st.error(f"Missing secret: {e}"); st.stop()
 
-COLLEGE_LAT = 17.4553223
-COLLEGE_LON = 78.6664965
+COLLEGE_LAT = 17.4558417
+COLLEGE_LON = 78.6670873
 RADIUS_M    = 500
 
 STUDENTS_CSV = "students_new.csv"
