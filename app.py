@@ -181,7 +181,6 @@ def admin_panel():
             if loc_enabled:
                 st.success("📍 **ENABLED**")
                 st.info("📌 SNIST\nLat: 17.4558417\nLon: 78.6670873\nRadius: 500m")
-                st.warning(f"⚠️ Set refresh rate ≥ 60s so students have time to verify location")
             else:
                 st.info("📍 **DISABLED**\nStudents mark from anywhere")
 
