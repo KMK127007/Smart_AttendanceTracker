@@ -83,16 +83,63 @@ def load_attendance_with_all_fields(company):
     path = att_csv(company)
     try:
         att_df = pd.read_csv(path)
+        if att_df.empty:
+            return att_df
         try:
             stu_df = pd.read_csv(STUDENTS_CSV)
+            # Normalize rollnumber column name
             if 'rollnumber' not in stu_df.columns:
                 for col in stu_df.columns:
-                    if 'roll' in col.lower(): stu_df = stu_df.rename(columns={col:'rollnumber'}); break
-            merged = att_df.merge(stu_df, on='rollnumber', how='left', suffixes=('','_stu'))
-            if 'company' not in merged.columns: merged['company'] = company
+                    if 'roll' in col.lower():
+                        stu_df = stu_df.rename(columns={col: 'rollnumber'})
+                        break
+
+            # Normalize S.No column name to exactly 'S.No' (handles s.no, S.no, S.No, sno etc.)
+            for col in stu_df.columns:
+                if col.lower().replace('.','').replace(' ','') in ['sno','sno','serialno','serialnumber']:
+                    stu_df = stu_df.rename(columns={col: 'S.No'})
+                    break
+
+            # Normalize merge key (case-insensitive roll number)
+            att_df['_roll_key'] = att_df['rollnumber'].astype(str).str.strip().str.lower()
+            stu_df['_roll_key'] = stu_df['rollnumber'].astype(str).str.strip().str.lower()
+
+            # Drop rollnumber from student df to avoid duplicate after merge
+            stu_df_merge = stu_df.drop(columns=['rollnumber'])
+
+            merged = att_df.merge(stu_df_merge, on='_roll_key', how='left')
+            merged = merged.drop(columns=['_roll_key'])
+
+            if 'company' not in merged.columns:
+                merged['company'] = company
+
+            # ── Clean up S.No: keep only one, place it first ──
+            # Find all columns that look like S.No (case-insensitive)
+            sno_cols = [c for c in merged.columns
+                        if c.lower().replace('.','').replace(' ','') in ['sno','serialno','serialnumber']]
+
+            if sno_cols:
+                # Keep the first one, rename to 'S.No', drop the rest
+                merged = merged.rename(columns={sno_cols[0]: 'S.No'})
+                extra_sno = sno_cols[1:]
+                if extra_sno:
+                    merged = merged.drop(columns=extra_sno)
+            else:
+                # No S.No in CSV at all - create one
+                merged.insert(0, 'S.No', 0)
+
+            # Always reset S.No to 1,2,3... based on report row order
+            merged['S.No'] = range(1, len(merged) + 1)
+
+            # Move S.No to first column
+            cols = ['S.No'] + [c for c in merged.columns if c != 'S.No']
+            merged = merged[cols]
+
             return merged
-        except: return att_df
-    except: return pd.DataFrame()
+        except Exception:
+            return att_df
+    except Exception:
+        return pd.DataFrame()
 
 def load_device_binding():
     try: return pd.read_csv(DEVICE_CSV)
@@ -291,7 +338,7 @@ def student_portal(company, device_id):
                 if not merged.empty and 'datestamp' in merged.columns:
                     td = merged[merged['datestamp']==today]
                     if not td.empty:
-                        st.success(f"**{len(td)} present**"); st.dataframe(td, width=900)
+                        st.success(f"**{len(td)} present**"); st.dataframe(td, width=900, hide_index=True)
                         st.download_button("⬇️ Download", td.to_csv(index=False).encode(), f"att_{sel}_{today}.csv","text/csv",key="dl_td")
                     else: st.info("No attendance today.")
                 else: st.info("No records yet.")
