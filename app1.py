@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 from datetime import datetime, date, timezone, timedelta
 import time, os, warnings, urllib.parse
@@ -234,36 +235,111 @@ def mark_attendance(rollnumber, company, device_id):
 # JS runs inside the component iframe, but uses window.top to navigate
 def check_location_with_js_eval(company):
     """
-    Uses streamlit-js-eval to get GPS directly - no iframe, no URL hacks.
-    Returns True if verified, False if blocked, None if still waiting.
+    GPS via custom JS button → updates URL params → Python reads them.
+    - enableHighAccuracy: false  → uses WiFi/network (works even with GPS chip OFF)
+    - maximumAge: 60000          → uses cached location if < 60s old (instant)
+    - timeout: 6000              → hard 6s cap, never hangs
+    Works on any device: GPS on, GPS off (WiFi fallback), cached = 2-5s total.
     """
-    st.info(f"🏢 **Company:** {company}")
-    st.warning("📍 **Location verification required.**")
-    st.info("Tap the button below. Allow location when your browser asks.")
+    import urllib.parse
+    params = st.query_params
 
-    if st.button("📍 Verify My Location", type="primary", key="gps_btn"):
-        with st.spinner("Getting your location (2-5 seconds)..."):
-            try:
-                loc = get_geolocation()
-                if loc and "coords" in loc:
-                    lat = loc["coords"]["latitude"]
-                    lon = loc["coords"]["longitude"]
-                    ok, dist = in_range(lat, lon)
-                    if ok:
-                        st.session_state.location_verified = True
-                        st.session_state.gps_lat = lat
-                        st.session_state.gps_lon = lon
-                        st.success(f"✅ Location verified! {int(dist)}m from SNIST.")
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.error(f"🚫 **Blocked** — You are {int(dist)}m away. Must be within {RADIUS_M}m of SNIST.")
-                        st.stop()
-                else:
-                    st.error("❌ Could not get location. Please allow location access and try again.")
-            except Exception as e:
-                st.error(f"❌ Location error: {str(e)}. Please enable GPS and try again.")
-    st.stop()
+    # ── Step 2: GPS result arrived in URL — verify distance ──
+    gps_lat = params.get("gps_lat", None)
+    gps_lon = params.get("gps_lon", None)
+    gps_err = params.get("gps_err", None)
+
+    if gps_lat and gps_lon:
+        try:
+            ok, dist = in_range(float(gps_lat), float(gps_lon))
+            if ok:
+                st.session_state.location_verified = True
+                st.session_state.gps_lat = float(gps_lat)
+                st.session_state.gps_lon = float(gps_lon)
+                for k in ["gps_lat", "gps_lon", "gps_acc", "gps_err"]:
+                    if k in st.query_params: del st.query_params[k]
+                st.rerun()
+            else:
+                st.error(f"🚫 **Blocked** — You are **{int(dist)}m** away. Must be within **{RADIUS_M}m** of SNIST.")
+                st.stop()
+        except:
+            st.error("❌ GPS read error. Please try again."); st.stop()
+
+    elif gps_err:
+        err_msgs = {
+            "1": "❌ Location permission denied. Please enable location in your browser settings.",
+            "2": "❌ Location unavailable. Please enable WiFi or GPS on your device.",
+            "3": "❌ Location timed out. Please enable WiFi or GPS and try again.",
+            "99": "❌ GPS not supported on this browser."
+        }
+        st.info(f"🏢 **Company:** {company}")
+        st.error(err_msgs.get(gps_err, "❌ Location error. Please try again."))
+        if st.button("🔄 Try Again", key="retry_gps"):
+            if "gps_err" in st.query_params: del st.query_params["gps_err"]
+            st.rerun()
+        st.stop()
+
+    else:
+        # ── Step 1: Show button — JS gets GPS and puts it in URL ──
+        st.info(f"🏢 **Company:** {company}")
+        st.warning("📍 **Location verification required.**")
+        st.info("📍 Tap the button below. Allow location when your browser asks.")
+
+        keep_params = "&".join([
+            f"{k}={urllib.parse.quote(str(v))}"
+            for k, v in params.items()
+            if k not in ["gps_lat", "gps_lon", "gps_acc", "gps_err"]
+        ])
+
+        gps_html = f"""
+        <!DOCTYPE html><html>
+        <head><meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body {{ margin:0; padding:8px; font-family:-apple-system,sans-serif; background:transparent; }}
+            button {{
+                width:100%; padding:14px; font-size:16px; font-weight:600;
+                background:#28a745; color:white; border:none; border-radius:8px; cursor:pointer;
+            }}
+            button:disabled {{ background:#6c757d; cursor:not-allowed; }}
+            .msg {{ margin-top:8px; padding:10px; border-radius:6px; font-size:14px; text-align:center; }}
+            .info {{ background:#d1ecf1; color:#0c5460; }}
+            .err  {{ background:#f8d7da; color:#721c24; }}
+        </style></head>
+        <body>
+        <button id="btn" onclick="getGPS()">📍 Verify My Location</button>
+        <div id="msg" class="msg info" style="display:none"></div>
+        <script>
+        var KEEP = "{keep_params}";
+        function getGPS() {{
+            var btn = document.getElementById('btn');
+            var msg = document.getElementById('msg');
+            btn.disabled = true; btn.textContent = '⏳ Getting location...';
+            msg.style.display = 'block'; msg.className = 'msg info';
+            msg.textContent = 'Please tap Allow when your browser asks for location...';
+            if (!navigator.geolocation) {{ doRedirect('','','','99'); return; }}
+            navigator.geolocation.getCurrentPosition(
+                function(pos) {{
+                    msg.textContent = '✅ Got location! Verifying...';
+                    doRedirect(pos.coords.latitude.toFixed(6), pos.coords.longitude.toFixed(6), Math.round(pos.coords.accuracy), '');
+                }},
+                function(err) {{
+                    msg.className='msg err'; msg.textContent='Location error ('+err.code+'). Redirecting...';
+                    doRedirect('','','',err.code);
+                }},
+                {{ enableHighAccuracy:false, timeout:6000, maximumAge:60000 }}
+            );
+        }}
+        function doRedirect(lat,lon,acc,err) {{
+            var base = window.top.location.href.split('?')[0];
+            var q = KEEP;
+            if (lat && lon) {{ q += '&gps_lat='+lat+'&gps_lon='+lon+'&gps_acc='+acc; }}
+            else {{ q += '&gps_err='+err; }}
+            window.top.location.href = base + '?' + q;
+        }}
+        </script></body></html>
+        """
+        components.html(gps_html, height=110, scrolling=False)
+        st.stop()
 
 
 # ── Student portal ────────────────────────────────────────
