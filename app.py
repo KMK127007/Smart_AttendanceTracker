@@ -67,10 +67,10 @@ def log_action(action, details=""):
         df.to_csv(LOG_CSV, index=False)
     except: pass
 
-def make_qr(token, company, loc_enabled):
+def make_qr(token, company, loc_enabled, refresh_secs=30):
     import urllib.parse
     company_enc = urllib.parse.quote(company)
-    url = f"https://smartapp12.streamlit.app?access={token}&company={company_enc}&loc={1 if loc_enabled else 0}"
+    url = f"https://smartapp12.streamlit.app?access={token}&company={company_enc}&loc={1 if loc_enabled else 0}&window={refresh_secs}"
     qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
     qr.add_data(url); qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
@@ -202,7 +202,7 @@ def admin_panel():
                     "qr_location_enabled": loc_enabled,
                     "qr_company": sel_company,
                     "qr_token": token,
-                    "qr_image": make_qr(token, sel_company, loc_enabled),
+                    "qr_image": make_qr(token, sel_company, loc_enabled, sel_refresh_secs),
                     "qr_last_refresh": ts,
                 })
                 log_action("start_qr", f"{sel_company} | {sel_time} | loc:{loc_enabled} | refresh:{sel_refresh_secs}s")
@@ -229,7 +229,7 @@ def admin_panel():
             if since_refresh >= refresh_secs:
                 new_token = f"qr_{now}"
                 st.session_state.qr_token = new_token
-                st.session_state.qr_image = make_qr(new_token, st.session_state.qr_company, st.session_state.qr_location_enabled)
+                st.session_state.qr_image = make_qr(new_token, st.session_state.qr_company, st.session_state.qr_location_enabled, refresh_secs)
                 st.session_state.qr_last_refresh = now
                 log_action("qr_refresh", st.session_state.qr_company)
 
