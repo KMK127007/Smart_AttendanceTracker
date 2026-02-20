@@ -198,7 +198,8 @@ def check_qr_access():
                 elapsed = int(time.time()) - ts
                 company = urllib.parse.unquote(params.get("company","General"))
                 loc_enabled = params.get("loc","0") == "1"
-                if elapsed <= 30:
+                window_secs = int(params.get("window", "30"))  # QR validity window from admin
+                if elapsed <= window_secs:
                     st.session_state.qr_access_granted = True
                     st.session_state.current_company = company
                     st.session_state.loc_required = loc_enabled
@@ -234,73 +235,68 @@ def mark_attendance(rollnumber, company, device_id):
 # JS runs inside the component iframe, but uses window.top to navigate
 def check_location_with_js_eval(company):
     """
-    GPS via streamlit_js_eval with custom fast settings.
-    Called at TOP LEVEL — not inside st.button (required by streamlit_js_eval).
-    enableHighAccuracy:false + maximumAge:60000 + timeout:6000 = 2-5s always.
+    GPS with button control to prevent 1000 simultaneous calls crashing the server.
+    Uses session state flag to trigger GPS only when button is clicked.
     """
     st.info(f"🏢 **Company:** {company}")
     st.warning("📍 **Location verification required.**")
-    st.info("📍 Please **Allow** location access when your browser asks.")
+    st.info("📍 Tap the button below, then Allow location when your browser asks.")
 
-    # streamlit_js_eval runs JS via its own component protocol — no iframe blocking
-    # Must be called at TOP LEVEL, not inside if/button branches
-    retry_key = f"fast_gps_{st.session_state.get('gps_retry_count', 0)}"
-    gps_result = streamlit_js_eval(
-        js_expressions="""
-        new Promise((resolve) => {
-            if (!navigator.geolocation) {
-                resolve({error: {code: 99, message: 'GPS not supported'}});
-                return;
-            }
-            navigator.geolocation.getCurrentPosition(
-                function(pos) {
-                    resolve({
-                        coords: {
-                            latitude:  pos.coords.latitude,
-                            longitude: pos.coords.longitude,
-                            accuracy:  pos.coords.accuracy
-                        }
-                    });
-                },
-                function(err) {
-                    resolve({error: {code: err.code, message: err.message}});
-                },
-                {
-                    enableHighAccuracy: false,
-                    timeout:            6000,
-                    maximumAge:         60000
+    # Only trigger GPS when button is clicked AND flag is set
+    # This prevents 1000 students from calling streamlit_js_eval simultaneously
+    if st.button("📍 Verify My Location", type="primary", key="start_gps_btn"):
+        st.session_state["gps_requested"] = True
+        st.rerun()
+
+    if not st.session_state.get("gps_requested", False):
+        st.stop()
+
+    # GPS is requested — call streamlit_js_eval
+    # This now only runs for students who actually clicked the button
+    retry_key = f"gps_{st.session_state.get('gps_retry', 0)}"
+    
+    with st.spinner("Getting your location..."):
+        gps_result = streamlit_js_eval(
+            js_expressions="""
+            new Promise((resolve) => {
+                if (!navigator.geolocation) {
+                    resolve({error: {code: 99}});
+                    return;
                 }
-            );
-        })
-        """,
-        want_output=True,
-        key=retry_key
-    )
+                navigator.geolocation.getCurrentPosition(
+                    (pos) => resolve({coords: {latitude: pos.coords.latitude, longitude: pos.coords.longitude}}),
+                    (err) => resolve({error: {code: err.code}}),
+                    {enableHighAccuracy: false, timeout: 6000, maximumAge: 60000}
+                );
+            })
+            """,
+            want_output=True,
+            key=retry_key
+        )
 
     if gps_result is None:
-        # Waiting for JS to return — show spinner and rerun
-        with st.spinner("Getting your location..."):
-            time.sleep(0.5)
+        time.sleep(0.3)
         st.rerun()
         return
 
+    # Clear the flag so GPS doesn't run again on next rerun
+    st.session_state["gps_requested"] = False
+
     if "error" in gps_result:
         code = str(gps_result["error"].get("code", "?"))
-        err_msgs = {
-            "1":  "❌ Location permission denied. Please enable location in your browser settings.",
-            "2":  "❌ Location unavailable. Please enable WiFi or GPS on your device.",
-            "3":  "❌ Location timed out. Please enable WiFi or GPS and try again.",
-            "99": "❌ GPS not supported on this browser."
-        }
-        st.error(err_msgs.get(code, f"❌ Location error (code {code}). Please try again."))
-        if st.button("🔄 Try Again", key="retry_gps_btn"):
-            st.session_state["gps_retry_count"] = st.session_state.get("gps_retry_count", 0) + 1
+        msgs = {"1": "❌ Permission denied. Enable location in browser settings.",
+                "2": "❌ GPS unavailable. Enable WiFi or GPS on your device.",
+                "3": "❌ Location timed out. Enable WiFi or GPS and try again.",
+                "99": "❌ GPS not supported on this browser."}
+        st.error(msgs.get(code, f"❌ Location error (code {code})."))
+        if st.button("🔄 Try Again", key="retry_btn"):
+            st.session_state["gps_retry"] = st.session_state.get("gps_retry", 0) + 1
+            st.session_state["gps_requested"] = True
             st.rerun()
         st.stop()
 
     if "coords" in gps_result:
-        lat = gps_result["coords"]["latitude"]
-        lon = gps_result["coords"]["longitude"]
+        lat, lon = gps_result["coords"]["latitude"], gps_result["coords"]["longitude"]
         ok, dist = in_range(lat, lon)
         if ok:
             st.session_state.location_verified = True
