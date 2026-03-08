@@ -1,39 +1,33 @@
 import streamlit as st
-import pandas as pd
-from datetime import datetime, date, timezone, timedelta
-import time, qrcode, json, base64, os, warnings
+import qrcode, base64, time
 from io import BytesIO
-from pathlib import Path
+from datetime import datetime, timezone, timedelta
+from supabase import create_client, Client
 
-warnings.filterwarnings('ignore')
-os.environ["PYTHONWARNINGS"] = "ignore"
-
+# IST timezone
 IST = timezone(timedelta(hours=5, minutes=30))
 def ist_now(): return datetime.now(IST)
 def ist_time_str(): return ist_now().strftime("%H:%M:%S")
 def ist_date_str(): return ist_now().strftime("%d-%m-%Y")
 def ist_datetime_str(): return ist_now().strftime("%d-%m-%Y %H:%M:%S")
 
+# Supabase client
 try:
-    ADMIN_USERNAME = st.secrets["admin_user"]["username"]
-    ADMIN_PASSWORD = st.secrets["admin_user"]["password"]
-    ADMINS = {ADMIN_USERNAME: {"password": ADMIN_PASSWORD}}
+    supabase: Client = create_client(
+        st.secrets["supabase"]["url"],
+        st.secrets["supabase"]["key"]
+    )
+except Exception as e:
+    st.error(f"Supabase connection error: {e}")
+    st.stop()
+
+# Admin credentials
+try:
+    ADMINS = {st.secrets["admin_user"]["username"]: {"password": st.secrets["admin_user"]["password"]}}
 except KeyError as e:
     st.error(f"Missing secret: {e}"); st.stop()
 
-def local_css():
-    try:
-        p = Path(__file__).parent / "style.css"
-        if p.exists(): st.markdown(f"<style>{p.read_text()}</style>", unsafe_allow_html=True)
-    except: pass
-
-local_css()
-
-LOG_CSV        = "activity_log.csv"
-COMPANIES_FILE = "companies.json"
-
-def att_csv(company): return f"attendance_{company.strip().replace(' ','_')}.csv"
-
+# Session state defaults
 for k, v in {
     "admin_logged": False, "admin_user": None,
     "qr_active": False, "qr_start_time": None,
@@ -44,28 +38,31 @@ for k, v in {
 }.items():
     if k not in st.session_state: st.session_state[k] = v
 
-# ── Helpers ───────────────────────────────────────────────
-def load_companies():
+# ── Supabase Functions ────────────────────────────────────
+def log_action(action, details="", username=None):
+    """Log admin action"""
     try:
-        with open(COMPANIES_FILE) as f: return json.load(f)
-    except: return []
+        supabase.table('admin_logs').insert({
+            'action': action,
+            'details': details,
+            'username': username or st.session_state.admin_user
+        }).execute()
+    except: pass
 
-def save_companies(lst):
-    with open(COMPANIES_FILE, "w") as f: json.dump(sorted(set(lst)), f)
+def load_companies():
+    """Get list of companies"""
+    try:
+        response = supabase.table('companies').select('name').order('name').execute()
+        return [row['name'] for row in response.data]
+    except:
+        return []
 
 def add_company(name):
-    if not name.strip(): return
-    c = load_companies()
-    if name.strip() not in c:
-        c.append(name.strip()); save_companies(c)
-
-def log_action(action, details=""):
-    row = {"timestamp": ist_datetime_str(), "action": action, "details": details}
+    """Add company if doesn't exist"""
     try:
-        df = pd.read_csv(LOG_CSV) if Path(LOG_CSV).exists() else pd.DataFrame()
-        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-        df.to_csv(LOG_CSV, index=False)
-    except: pass
+        supabase.table('companies').insert({'name': name}).execute()
+    except:
+        pass  # Already exists
 
 def make_qr(token, company, loc_enabled, refresh_secs=30):
     import urllib.parse
@@ -77,17 +74,17 @@ def make_qr(token, company, loc_enabled, refresh_secs=30):
     buf = BytesIO(); img.save(buf, format="PNG"); buf.seek(0)
     return base64.b64encode(buf.getvalue()).decode()
 
-# ── Login/Logout ──────────────────────────────────────────
+# ── Login ──────────────────────────────────────────────────
 def admin_login():
-    st.sidebar.header("🔐 Admin Login")
-    u = st.sidebar.text_input("Username", key="adm_u")
-    p = st.sidebar.text_input("Password", type="password", key="adm_p")
-    if st.sidebar.button("Login"):
+    st.markdown('<div style="text-align:center; padding:20px"><h2>🔐 Admin Login</h2></div>', unsafe_allow_html=True)
+    u = st.text_input("Username", key="login_u")
+    p = st.text_input("Password", type="password", key="login_p")
+    if st.button("Login", type="primary"):
         if u in ADMINS and ADMINS[u]["password"] == p:
             st.session_state.admin_logged = True
             st.session_state.admin_user = u
             log_action("admin_login", u); st.rerun()
-        else: st.sidebar.error("Invalid credentials ❌")
+        else: st.error("❌ Invalid credentials")
 
 def admin_logout():
     if st.sidebar.button("🚪 Logout"):
@@ -97,7 +94,7 @@ def admin_logout():
 
 # ── Admin Panel ───────────────────────────────────────────
 def admin_panel():
-    st.markdown('<div class="header">🎯 QR Attendance System — Admin Panel</div>', unsafe_allow_html=True)
+    st.markdown('<h1 style="text-align:center">🎯 QR Attendance System — Admin Panel</h1>', unsafe_allow_html=True)
     st.write(f"Logged in as **{st.session_state.admin_user}**")
     st.markdown("---")
 
@@ -109,15 +106,14 @@ def admin_panel():
 
         # Stage 1
         st.markdown("#### 📂 Stage 1 — Students Database")
-        st.info("Upload the students CSV in **smartapp12** (Admin → Upload CSV tab) before generating QR.")
+        st.info("Upload the students CSV/Excel in **smartapp12** (Admin → Upload CSV tab) before generating QR.")
 
         st.markdown("---")
 
         # Stage 2
         st.markdown("#### ⚙️ Stage 2 — Configure Settings")
 
-        # Render location toggle FIRST (outside columns) so its value is available
-        # when we decide whether to show the refresh rate dropdown
+        # Location toggle first (outside columns)
         st.markdown("**📍 Location Verification**")
         loc_enabled = st.toggle("Enable Location Check", value=False, key="loc_toggle",
                                 help="Students must be within 500m of SNIST")
@@ -253,36 +249,32 @@ def admin_panel():
                     st.info("📍 Location: OFF")
                     st.caption("Refresh every 30s ✅")
 
-            time.sleep(1); st.rerun()
+            time.sleep(1)
+            st.rerun()
 
     # ── TAB 2: Logs ───────────────────────────────────────
     with tabs[1]:
-        st.markdown("### 📋 Activity Logs")
-        if Path(LOG_CSV).exists():
-            df = pd.read_csv(LOG_CSV)
-            st.dataframe(df.sort_values("timestamp", ascending=False).head(100), width=1000)
-            st.download_button("⬇️ Download Logs", df.to_csv(index=False).encode(), "activity_log.csv", "text/csv", key="dl_log")
-        else:
-            st.info("No logs yet.")
+        st.markdown("### 📋 Admin Activity Logs")
+        try:
+            response = supabase.table('admin_logs').select('*').order('timestamp', desc=True).limit(50).execute()
+            if response.data:
+                import pandas as pd
+                df = pd.DataFrame(response.data)
+                st.dataframe(df[['timestamp', 'action', 'details', 'username']], use_container_width=True)
+            else:
+                st.info("No logs yet.")
+        except Exception as e:
+            st.error(f"Error loading logs: {e}")
 
+# ── Main ──────────────────────────────────────────────────
 def main():
-    st.set_page_config(page_title="QR Attendance Admin", page_icon="🎯", layout="wide")
-    st.sidebar.title("🎯 QR Attendance System")
-    if st.session_state.admin_logged:
-        admin_logout(); admin_panel()
-    else:
+    st.set_page_config(page_title="QR Admin Panel", page_icon="🎯", layout="centered")
+    
+    if not st.session_state.admin_logged:
         admin_login()
-        st.markdown('<div class="header">🎯 Smart QR Attendance System</div>', unsafe_allow_html=True)
-        st.markdown("""
-        ### Features:
-        - ✅ Company-wise attendance tracking
-        - ✅ Custom time window (1–30 mins)
-        - ✅ Auto-refreshing QR every 30s
-        - ✅ Optional location check (SNIST)
-        - ✅ Single device per student
-        
-        **👈 Login from sidebar!**
-        """)
+    else:
+        admin_logout()
+        admin_panel()
 
 if __name__ == "__main__":
     main()
