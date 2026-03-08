@@ -14,7 +14,7 @@ import os
 SUPABASE_URL = "https://fjtsnqxbvltfcaujqkpi.supabase.co"  # e.g., https://xxxxx.supabase.co
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZqdHNucXhidmx0ZmNhdWpxa3BpIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3Mjk2NjI3OSwiZXhwIjoyMDg4NTQyMjc5fQ.b7HxI3Twg43cVxHWSaZT6-NACGRSXufigsxDA_mHO1Q"  # Use service_role key for bulk insert
 
-EXCEL_FILE = "Students_List_For_Sreenidhi_attenance.xlsx"
+EXCEL_FILE = "students_new.csv"
 
 # =============================================================================
 
