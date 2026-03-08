@@ -1,31 +1,37 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, date, timezone, timedelta
-import time, os, warnings, urllib.parse
-from pathlib import Path
+from datetime import datetime, timezone, timedelta
+import time, urllib.parse
 from math import radians, sin, cos, sqrt, atan2
+from supabase import create_client, Client
 
-warnings.filterwarnings('ignore')
-os.environ["PYTHONWARNINGS"] = "ignore"
-
-# streamlit-js-eval: reliable JS execution in Streamlit
-# Add to requirements.txt: streamlit-js-eval==0.1.7
+# streamlit-js-eval for GPS
 try:
     from streamlit_js_eval import streamlit_js_eval
     JS_EVAL_AVAILABLE = True
 except ImportError:
     JS_EVAL_AVAILABLE = False
 
+# IST timezone
 IST = timezone(timedelta(hours=5, minutes=30))
-def ist_now():          return datetime.now(IST)
-def ist_time_str():     return ist_now().strftime("%H:%M:%S")
-def ist_date_str():     return ist_now().strftime("%d-%m-%Y")
+def ist_now(): return datetime.now(IST)
+def ist_time_str(): return ist_now().strftime("%H:%M:%S")
+def ist_date_str(): return ist_now().strftime("%d-%m-%Y")
 def ist_datetime_str(): return ist_now().strftime("%d-%m-%Y %H:%M:%S")
 
+# Supabase client
 try:
-    ADMIN_USERNAME = st.secrets["admin_user"]["username"]
-    ADMIN_PASSWORD = st.secrets["admin_user"]["password"]
-    ADMINS = {ADMIN_USERNAME: {"password": ADMIN_PASSWORD}}
+    supabase: Client = create_client(
+        st.secrets["supabase"]["url"],
+        st.secrets["supabase"]["key"]
+    )
+except Exception as e:
+    st.error(f"Supabase connection error: {e}")
+    st.stop()
+
+# Admin credentials
+try:
+    ADMINS = {st.secrets["admin_user"]["username"]: {"password": st.secrets["admin_user"]["password"]}}
 except KeyError as e:
     st.error(f"Missing secret: {e}"); st.stop()
 
@@ -33,19 +39,7 @@ COLLEGE_LAT = 17.4558417
 COLLEGE_LON = 78.6670873
 RADIUS_M    = 500
 
-STUDENTS_CSV = "students_new.csv"
-DEVICE_CSV   = "device_binding.csv"
-
-def att_csv(c): return f"attendance_{c.strip().replace(' ','_')}.csv"
-
-def local_css():
-    try:
-        p = Path(__file__).parent / "style.css"
-        if p.exists(): st.markdown(f"<style>{p.read_text()}</style>", unsafe_allow_html=True)
-    except: pass
-
-local_css()
-
+# Session state defaults
 for k, v in {
     "admin_logged_app1": False,
     "qr_access_granted": False,
@@ -58,106 +52,7 @@ for k, v in {
 }.items():
     if k not in st.session_state: st.session_state[k] = v
 
-# ── CSV helpers ───────────────────────────────────────────
-def load_students():
-    try:
-        df = pd.read_csv(STUDENTS_CSV)
-        if 'rollnumber' not in df.columns:
-            for col in df.columns:
-                if 'roll' in col.lower(): return df.rename(columns={col:'rollnumber'})
-        return df
-    except: return pd.DataFrame(columns=["rollnumber"])
-
-def load_attendance(company):
-    path = att_csv(company)
-    try:
-        df = pd.read_csv(path)
-        for c in ["rollnumber","timestamp","datestamp","company"]:
-            if c not in df.columns: df[c] = ""
-        return df[["rollnumber","timestamp","datestamp","company"]]
-    except:
-        df = pd.DataFrame(columns=["rollnumber","timestamp","datestamp","company"])
-        df.to_csv(path, index=False); return df
-
-def load_attendance_with_all_fields(company):
-    path = att_csv(company)
-    try:
-        att_df = pd.read_csv(path)
-        if att_df.empty:
-            return att_df
-        try:
-            stu_df = pd.read_csv(STUDENTS_CSV)
-            # Normalize rollnumber column name
-            if 'rollnumber' not in stu_df.columns:
-                for col in stu_df.columns:
-                    if 'roll' in col.lower():
-                        stu_df = stu_df.rename(columns={col: 'rollnumber'})
-                        break
-
-            # Normalize S.No column name to exactly 'S.No' (handles s.no, S.no, S.No, sno etc.)
-            for col in stu_df.columns:
-                if col.lower().replace('.','').replace(' ','') in ['sno','sno','serialno','serialnumber']:
-                    stu_df = stu_df.rename(columns={col: 'S.No'})
-                    break
-
-            # Normalize merge key (case-insensitive roll number)
-            att_df['_roll_key'] = att_df['rollnumber'].astype(str).str.strip().str.lower()
-            stu_df['_roll_key'] = stu_df['rollnumber'].astype(str).str.strip().str.lower()
-
-            # Drop rollnumber from student df to avoid duplicate after merge
-            stu_df_merge = stu_df.drop(columns=['rollnumber'])
-
-            merged = att_df.merge(stu_df_merge, on='_roll_key', how='left')
-            merged = merged.drop(columns=['_roll_key'])
-
-            if 'company' not in merged.columns:
-                merged['company'] = company
-
-            # ── Clean up S.No: keep only one, place it first ──
-            # Find all columns that look like S.No (case-insensitive)
-            sno_cols = [c for c in merged.columns
-                        if c.lower().replace('.','').replace(' ','') in ['sno','serialno','serialnumber']]
-
-            if sno_cols:
-                # Keep the first one, rename to 'S.No', drop the rest
-                merged = merged.rename(columns={sno_cols[0]: 'S.No'})
-                extra_sno = sno_cols[1:]
-                if extra_sno:
-                    merged = merged.drop(columns=extra_sno)
-            else:
-                # No S.No in CSV at all - create one
-                merged.insert(0, 'S.No', 0)
-
-            # Always reset S.No to 1,2,3... based on report row order
-            merged['S.No'] = range(1, len(merged) + 1)
-
-            # Move S.No to first column
-            cols = ['S.No'] + [c for c in merged.columns if c != 'S.No']
-            merged = merged[cols]
-
-            return merged
-        except Exception:
-            return att_df
-    except Exception:
-        return pd.DataFrame()
-
-def load_device_binding():
-    try: return pd.read_csv(DEVICE_CSV)
-    except:
-        df = pd.DataFrame(columns=["rollnumber","device_id","bound_at"])
-        df.to_csv(DEVICE_CSV, index=False); return df
-
-def save_device_binding(df): df.to_csv(DEVICE_CSV, index=False)
-
-def get_all_companies():
-    companies = []
-    for f in Path(".").glob("attendance_*.csv"):
-        name = f.stem.replace("attendance_","").replace("_"," ")
-        companies.append(name)
-    if st.session_state.current_company not in companies:
-        companies.append(st.session_state.current_company)
-    return sorted(set(companies))
-
+# ── Supabase Functions ────────────────────────────────────
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371000
     lat1,lon1,lat2,lon2 = map(radians,[lat1,lon1,lat2,lon2])
@@ -170,23 +65,33 @@ def in_range(user_lat, user_lon):
     return d <= RADIUS_M, d
 
 def check_device_binding(rollnumber, device_id):
+    """Check/create device binding"""
     if not device_id:
         return False, "❌ Device ID missing. Please refresh."
-    df = load_device_binding()
     roll_lower = rollnumber.strip().lower()
-    device_rows = df[df['device_id'] == device_id]
-    if not device_rows.empty:
-        bound_roll = device_rows.iloc[0]['rollnumber'].lower()
-        if bound_roll != roll_lower:
-            return False, f"❌ This device is already used by **{bound_roll.upper()}**. One device = one student only."
+    try:
+        # Check if device already used
+        dev_check = supabase.table('device_binding').select('rollnumber').eq('device_id', device_id).execute()
+        if dev_check.data:
+            bound_roll = dev_check.data[0]['rollnumber']
+            if bound_roll != roll_lower:
+                return False, f"❌ This device is already used by **{bound_roll.upper()}**. One device = one student only."
+            return True, "ok"
+        
+        # Check if roll already on different device
+        roll_check = supabase.table('device_binding').select('device_id').eq('rollnumber', roll_lower).execute()
+        if roll_check.data:
+            return False, "❌ Your roll number is already registered on a different device. Contact admin to unbind."
+        
+        # Create new binding
+        supabase.table('device_binding').insert({
+            'rollnumber': roll_lower,
+            'device_id': device_id,
+            'bound_at': ist_datetime_str()
+        }).execute()
         return True, "ok"
-    roll_rows = df[df['rollnumber'].str.lower() == roll_lower]
-    if not roll_rows.empty:
-        return False, "❌ Your roll number is already registered on a different device. Contact admin to unbind."
-    new_row = pd.DataFrame([{'rollnumber': roll_lower, 'device_id': device_id, 'bound_at': ist_datetime_str()}])
-    df = pd.concat([df, new_row], ignore_index=True)
-    save_device_binding(df)
-    return True, "ok"
+    except Exception as e:
+        return False, f"❌ Device binding error: {str(e)}"
 
 def check_qr_access():
     params = st.query_params
@@ -198,7 +103,7 @@ def check_qr_access():
                 elapsed = int(time.time()) - ts
                 company = urllib.parse.unquote(params.get("company","General"))
                 loc_enabled = params.get("loc","0") == "1"
-                window_secs = int(params.get("window", "30"))  # QR validity window from admin
+                window_secs = int(params.get("window", "30"))
                 if elapsed <= window_secs:
                     st.session_state.qr_access_granted = True
                     st.session_state.current_company = company
@@ -210,40 +115,41 @@ def check_qr_access():
     return False, "Please scan the QR code shown by your admin."
 
 def mark_attendance(rollnumber, company, device_id):
-    students = load_students()
-    if students.empty or 'rollnumber' not in students.columns:
-        return False, "❌ Student database not loaded. Contact admin."
-    students['rollnumber'] = students['rollnumber'].astype(str).str.strip()
-    if students[students['rollnumber'].str.lower() == rollnumber.strip().lower()].empty:
-        return False, f"❌ Roll number '{rollnumber}' not found."
-    ok, msg = check_device_binding(rollnumber, device_id)
-    if not ok: return False, msg
-    att_df = load_attendance(company)
-    if not att_df.empty:
-        already = att_df[att_df['rollnumber'].str.lower() == rollnumber.strip().lower()]
-        if not already.empty:
-            return False, f"⚠️ Attendance already marked for {company} (on {already.iloc[0]['datestamp']})."
-    today = ist_date_str()
-    new = pd.DataFrame([{'rollnumber': rollnumber.strip(), 'timestamp': ist_time_str(), 'datestamp': today, 'company': company}])
-    att_df = pd.concat([att_df, new], ignore_index=True)
-    att_df.to_csv(att_csv(company), index=False)
-    return True, "✅ Attendance marked successfully!"
+    """Mark attendance with all security checks"""
+    try:
+        # Check if student exists
+        student_check = supabase.table('students').select('rollnumber').eq('rollnumber', rollnumber.strip().lower()).execute()
+        if not student_check.data:
+            return False, f"❌ Roll number '{rollnumber}' not found."
+        
+        # Device binding check
+        ok, msg = check_device_binding(rollnumber, device_id)
+        if not ok: return False, msg
+        
+        # Check if already marked for this company
+        dup_check = supabase.table('attendance').select('id').eq('rollnumber', rollnumber.strip().lower()).eq('company', company).execute()
+        if dup_check.data:
+            return False, f"⚠️ Attendance already marked for {company}."
+        
+        # Insert attendance
+        supabase.table('attendance').insert({
+            'rollnumber': rollnumber.strip().lower(),
+            'company': company,
+            'timestamp': ist_time_str(),
+            'datestamp': ist_date_str(),
+            'device_id': device_id
+        }).execute()
+        
+        return True, "✅ Attendance marked successfully!"
+    except Exception as e:
+        return False, f"❌ Error: {str(e)}"
 
-# ── GPS page: full visible component, updates URL directly ─
-# This is rendered as its own full screen - no iframe blocking issues
-# The component has height=400 so it's a real visible element
-# JS runs inside the component iframe, but uses window.top to navigate
 def check_location_with_js_eval(company):
-    """
-    GPS with button control to prevent 1000 simultaneous calls crashing the server.
-    Uses session state flag to trigger GPS only when button is clicked.
-    """
+    """GPS with button control to prevent 1000 simultaneous calls"""
     st.info(f"🏢 **Company:** {company}")
     st.warning("📍 **Location verification required.**")
     st.info("📍 Tap the button below, then Allow location when your browser asks.")
 
-    # Only trigger GPS when button is clicked AND flag is set
-    # This prevents 1000 students from calling streamlit_js_eval simultaneously
     if st.button("📍 Verify My Location", type="primary", key="start_gps_btn"):
         st.session_state["gps_requested"] = True
         st.rerun()
@@ -251,8 +157,6 @@ def check_location_with_js_eval(company):
     if not st.session_state.get("gps_requested", False):
         st.stop()
 
-    # GPS is requested — call streamlit_js_eval
-    # This now only runs for students who actually clicked the button
     retry_key = f"gps_{st.session_state.get('gps_retry', 0)}"
     
     with st.spinner("Getting your location..."):
@@ -279,7 +183,6 @@ def check_location_with_js_eval(company):
         st.rerun()
         return
 
-    # Clear the flag so GPS doesn't run again on next rerun
     st.session_state["gps_requested"] = False
 
     if "error" in gps_result:
@@ -310,14 +213,13 @@ def check_location_with_js_eval(company):
         st.error("❌ Could not read location. Please try again.")
         st.stop()
 
-
 # ── Student portal ────────────────────────────────────────
 def student_portal(company, device_id):
-    st.markdown('<div class="header">📱 QR Attendance Portal</div>', unsafe_allow_html=True)
+    st.markdown('<h1 style="text-align:center">📱 QR Attendance Portal</h1>', unsafe_allow_html=True)
     st.markdown("### Mark Your Attendance")
     st.info(f"🏢 **Company / Drive:** {company}")
 
-    roll = st.text_input("Roll Number", key="qr_roll", placeholder="e.g. 22311a1965")
+    roll = st.text_input("Roll Number", key="qr_roll", placeholder="e.g. 22311a0138")
     if st.button("✅ Mark Attendance", type="primary", key="mark_btn"):
         if roll.strip():
             with st.spinner("Marking attendance..."):
@@ -352,115 +254,206 @@ def student_portal(company, device_id):
             if st.button("🚪 Logout", key="adm_out"):
                 st.session_state.admin_logged_app1 = False; st.rerun()
         st.markdown("---")
-        admin_tabs = st.tabs(["📂 Upload CSV","📊 Today's Attendance","📋 All Records","✍️ Manual Entry","📱 Device Bindings"])
+        admin_tabs = st.tabs(["📂 Upload Students","📊 Today's Attendance","📋 All Records","✍️ Manual Entry","📱 Device Bindings"])
 
         with admin_tabs[0]:
-            st.markdown("### 📂 Upload Students CSV")
-            st.info("Upload any CSV with a **rollnumber** column.")
-            uf = st.file_uploader("Upload CSV", type=["csv"], key="csv_upload")
+            st.markdown("### 📂 Upload Students")
+            st.info("Upload Excel/CSV with student data. Will bulk insert to database.")
+            uf = st.file_uploader("Upload File", type=["csv", "xlsx"], key="stu_upload")
             if uf:
                 try:
-                    df = pd.read_csv(uf)
-                    roll_col = next((c for c in df.columns if 'roll' in c.lower()), None)
-                    if not roll_col: st.error("❌ No rollnumber column!")
+                    if uf.name.endswith('.csv'):
+                        df = pd.read_csv(uf)
                     else:
-                        if roll_col != 'rollnumber': df = df.rename(columns={roll_col:'rollnumber'})
-                        df.to_csv(STUDENTS_CSV, index=False)
-                        st.success(f"✅ {len(df)} students saved.")
-                        st.dataframe(df.head(10), width=600)
-                except Exception as e: st.error(f"Error: {e}")
-            cur = load_students()
-            if not cur.empty:
-                st.markdown("---"); st.success(f"📋 **{len(cur)} students**"); st.dataframe(cur, width=700)
+                        df = pd.read_excel(uf)
+                    
+                    # Normalize columns
+                    if 'Roll No' in df.columns:
+                        df = df.rename(columns={'Roll No': 'rollnumber'})
+                    elif 'rollnumber' not in df.columns:
+                        st.error("❌ Must have 'Roll No' or 'rollnumber' column!")
+                        st.stop()
+                    
+                    df['rollnumber'] = df['rollnumber'].astype(str).str.strip().str.lower()
+                    
+                    # Map columns to database schema
+                    col_map = {
+                        'S.No.': 'sno',
+                        'Name': 'name',
+                        'Course': 'course',
+                        'Mobile': 'mobile',
+                        'Email ID': 'email',
+                        'Gender': 'gender',
+                        'Current Term Score': 'current_term_score',
+                        'Xth percentage': 'xth_percentage',
+                        'XIIth percentage': 'xiith_percentage',
+                        'Backlogs': 'backlogs'
+                    }
+                    df = df.rename(columns=col_map)
+                    
+                    # Select only columns that exist in DB
+                    db_cols = ['rollnumber', 'name', 'course', 'mobile', 'email', 'gender', 
+                               'current_term_score', 'xth_percentage', 'xiith_percentage', 'backlogs']
+                    upload_cols = [c for c in db_cols if c in df.columns]
+                    df_upload = df[upload_cols]
+                    
+                    st.success(f"✅ Found {len(df_upload)} students")
+                    st.dataframe(df_upload.head(10), use_container_width=True)
+                    
+                    if st.button("📤 Upload to Database", key="do_upload"):
+                        with st.spinner(f"Uploading {len(df_upload)} students..."):
+                            data = df_upload.to_dict('records')
+                            try:
+                                # Batch insert (500 at a time)
+                                batch_size = 500
+                                for i in range(0, len(data), batch_size):
+                                    batch = data[i:i+batch_size]
+                                    supabase.table('students').upsert(batch, on_conflict='rollnumber').execute()
+                                st.success(f"✅ {len(data)} students uploaded!")
+                            except Exception as e:
+                                st.error(f"❌ Error: {str(e)}")
+                except Exception as e:
+                    st.error(f"❌ Error reading file: {str(e)}")
 
         with admin_tabs[1]:
-            today = ist_date_str()
-            st.markdown(f"### 📅 Today ({today})")
-            comps = get_all_companies()
-            if comps:
-                sel = st.selectbox("Company:", comps, key="today_comp")
-                merged = load_attendance_with_all_fields(sel)
-                if not merged.empty and 'datestamp' in merged.columns:
-                    td = merged[merged['datestamp']==today]
-                    if not td.empty:
-                        st.success(f"**{len(td)} present**"); st.dataframe(td, width=900, hide_index=True)
-                        st.download_button("⬇️ Download", td.to_csv(index=False).encode(), f"att_{sel}_{today}.csv","text/csv",key="dl_td")
-                    else: st.info("No attendance today.")
-                else: st.info("No records yet.")
-            else: st.info("No companies yet.")
+            st.markdown("### 📅 Today's Attendance")
+            try:
+                companies = supabase.table('companies').select('name').execute()
+                if companies.data:
+                    comp = st.selectbox("Company:", [c['name'] for c in companies.data], key="today_comp")
+                    today = ist_date_str()
+                    
+                    # Get attendance with student details
+                    att = supabase.table('attendance').select('*').eq('company', comp).eq('datestamp', today).execute()
+                    if att.data:
+                        att_df = pd.DataFrame(att.data)
+                        
+                        # Get student details
+                        rolls = att_df['rollnumber'].unique().tolist()
+                        students = supabase.table('students').select('*').in_('rollnumber', rolls).execute()
+                        stu_df = pd.DataFrame(students.data) if students.data else pd.DataFrame()
+                        
+                        if not stu_df.empty:
+                            merged = att_df.merge(stu_df, on='rollnumber', how='left')
+                            merged.insert(0, 'S.No', range(1, len(merged) + 1))
+                            st.success(f"**{len(merged)} present**")
+                            st.dataframe(merged, use_container_width=True, hide_index=True)
+                            st.download_button("⬇️ Download", merged.to_csv(index=False).encode(), f"attendance_{comp}_{today}.csv", "text/csv")
+                        else:
+                            st.dataframe(att_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No attendance today.")
+            except Exception as e:
+                st.error(f"Error: {e}")
 
         with admin_tabs[2]:
-            st.markdown("### 📋 All Records by Company")
-            comps = get_all_companies()
-            if comps:
-                for comp in comps:
-                    merged = load_attendance_with_all_fields(comp)
-                    if not merged.empty:
-                        c1,c2,c3 = st.columns([2,1,1])
-                        with c1: st.write(f"🏢 **{comp}**")
-                        with c2: st.write(f"{len(merged)} records")
-                        with c3: st.download_button("⬇️ Download", merged.to_csv(index=False).encode(), f"attendance_{comp}.csv","text/csv",key=f"dl_{comp}")
-                        st.markdown("---")
-            else: st.info("No records yet.")
+            st.markdown("### 📋 All Attendance Records")
+            try:
+                companies = supabase.table('companies').select('name').execute()
+                if companies.data:
+                    for comp_row in companies.data:
+                        comp = comp_row['name']
+                        att = supabase.table('attendance').select('*').eq('company', comp).execute()
+                        if att.data:
+                            att_df = pd.DataFrame(att.data)
+                            rolls = att_df['rollnumber'].unique().tolist()
+                            students = supabase.table('students').select('*').in_('rollnumber', rolls).execute()
+                            stu_df = pd.DataFrame(students.data) if students.data else pd.DataFrame()
+                            
+                            if not stu_df.empty:
+                                merged = att_df.merge(stu_df, on='rollnumber', how='left')
+                                merged.insert(0, 'S.No', range(1, len(merged) + 1))
+                            else:
+                                merged = att_df
+                            
+                            c1,c2,c3 = st.columns([2,1,1])
+                            with c1: st.write(f"🏢 **{comp}**")
+                            with c2: st.write(f"{len(merged)} records")
+                            with c3: st.download_button("⬇️", merged.to_csv(index=False).encode(), f"attendance_{comp}.csv", "text/csv", key=f"dl_{comp}")
+                            st.markdown("---")
+            except Exception as e:
+                st.error(f"Error: {e}")
 
         with admin_tabs[3]:
             st.markdown("### ✍️ Manual Entry")
-            students = load_students()
-            man_roll = st.selectbox("Roll Number:",[""] + students['rollnumber'].tolist(), key="man_roll_sel") if not students.empty else st.text_input("Roll Number:", key="man_roll_txt")
-            mode = st.radio("Company:", ["Select Existing","Enter New"], horizontal=True, key="man_comp_mode", label_visibility="collapsed")
-            all_comps = get_all_companies(); man_company = None
-            if mode=="Select Existing":
-                if all_comps: man_company = st.selectbox("Select:", all_comps, key="man_comp_sel")
-                else: st.warning("No companies yet.")
-            if mode=="Enter New":
-                nc = st.text_input("Company Name:", key="man_new_comp")
-                if nc.strip(): man_company = nc.strip()
-            man_date = st.date_input("Date:", value=date.today(), key="man_date")
-            if st.button("✅ Mark", type="primary", key="man_mark_btn"):
-                if man_roll and man_company:
-                    ds = man_date.strftime("%d-%m-%Y")
-                    att_df = load_attendance(man_company)
-                    already = att_df[att_df['rollnumber'].str.lower()==str(man_roll).lower()] if not att_df.empty else pd.DataFrame()
-                    if not already.empty: st.warning(f"Already marked {man_roll} for {man_company}")
+            try:
+                students = supabase.table('students').select('rollnumber').execute()
+                rolls = [s['rollnumber'] for s in students.data] if students.data else []
+                
+                man_roll = st.selectbox("Roll Number:", [""] + rolls, key="man_roll") if rolls else st.text_input("Roll:", key="man_roll_txt")
+                
+                companies = supabase.table('companies').select('name').execute()
+                comps = [c['name'] for c in companies.data] if companies.data else []
+                
+                mode = st.radio("Company:", ["Select Existing","Enter New"], horizontal=True, key="man_mode")
+                man_company = None
+                if mode == "Select Existing":
+                    if comps: man_company = st.selectbox("Select:", comps, key="man_comp_sel")
+                if mode == "Enter New":
+                    nc = st.text_input("Company Name:", key="man_new_comp")
+                    if nc.strip(): man_company = nc.strip()
+                
+                from datetime import date
+                man_date = st.date_input("Date:", value=date.today(), key="man_date")
+                
+                if st.button("✅ Mark", type="primary", key="man_mark"):
+                    if man_roll and man_company:
+                        ds = man_date.strftime("%d-%m-%Y")
+                        try:
+                            supabase.table('attendance').insert({
+                                'rollnumber': str(man_roll).strip().lower(),
+                                'company': man_company,
+                                'timestamp': ist_time_str(),
+                                'datestamp': ds,
+                                'device_id': 'MANUAL_ADMIN'
+                            }).execute()
+                            st.success(f"✅ {man_roll} marked for {man_company} on {ds}!")
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
                     else:
-                        new = pd.DataFrame([{'rollnumber':str(man_roll).strip(),'timestamp':ist_time_str(),'datestamp':ds,'company':man_company}])
-                        att_df = pd.concat([att_df,new],ignore_index=True); att_df.to_csv(att_csv(man_company),index=False)
-                        st.success(f"✅ {man_roll} marked for {man_company} on {ds}!"); st.rerun()
-                else: st.warning("Enter both roll number and company.")
+                        st.warning("Enter both roll and company.")
+            except Exception as e:
+                st.error(f"Error: {e}")
 
         with admin_tabs[4]:
             st.markdown("### 📱 Device Bindings")
             st.info("One device = one student. Unbind here if student changes device.")
-            df = load_device_binding()
-            if not df.empty:
-                st.dataframe(df, width=800); st.info(f"**{len(df)} devices bound**")
-                to_unbind = st.selectbox("Roll to Unbind:", [""]+df['rollnumber'].tolist(), key="unbind_sel")
-                if to_unbind and st.button("🔓 Unbind", key="unbind_btn"):
-                    df = df[df['rollnumber']!=to_unbind]; save_device_binding(df)
-                    st.success(f"✅ '{to_unbind}' unbound."); st.rerun()
-            else: st.info("No devices bound yet.")
+            try:
+                bindings = supabase.table('device_binding').select('*').execute()
+                if bindings.data:
+                    df = pd.DataFrame(bindings.data)
+                    st.dataframe(df, use_container_width=True)
+                    st.info(f"**{len(df)} devices bound**")
+                    
+                    to_unbind = st.selectbox("Roll to Unbind:", [""]+df['rollnumber'].tolist(), key="unbind_sel")
+                    if to_unbind and st.button("🔓 Unbind", key="unbind_btn"):
+                        supabase.table('device_binding').delete().eq('rollnumber', to_unbind).execute()
+                        st.success(f"✅ '{to_unbind}' unbound.")
+                        st.rerun()
+                else:
+                    st.info("No devices bound yet.")
+            except Exception as e:
+                st.error(f"Error: {e}")
 
     st.markdown("---")
-    st.caption("📱 Smart Attendance Tracker — QR Portal | Powered by Streamlit")
+    st.caption("📱 Smart Attendance Tracker — QR Portal | Powered by Streamlit + Supabase")
 
 # ── Main ──────────────────────────────────────────────────
 def main():
     st.set_page_config(page_title="QR Attendance Portal", page_icon="📱", layout="centered")
-    params = st.query_params
 
-    # Device ID: stable UUID for this browser session
-    # Single-entry enforcement is done by the attendance CSV check (not device alone)
+    # Device ID from session (simple UUID)
     if not st.session_state.device_id:
         import uuid
         st.session_state.device_id = "SES_" + uuid.uuid4().hex[:20].upper()
 
-    # ── ADMIN: no checks, stays forever ──────────────────
+    # ADMIN: no checks
     if st.session_state.admin_logged_app1:
-        company = st.session_state.current_company or urllib.parse.unquote(params.get("company","General"))
+        company = st.session_state.current_company or "General"
         student_portal(company, st.session_state.device_id)
         return
 
-    # ── STUDENT: QR check ────────────────────────────────
+    # STUDENT: QR check
     valid, err = check_qr_access()
 
     if not valid:
@@ -482,13 +475,13 @@ def main():
     company      = st.session_state.current_company
     loc_required = st.session_state.loc_required
 
-    # ── Location check ────────────────────────────────────
+    # Location check
     if loc_required and not st.session_state.location_verified:
         if not JS_EVAL_AVAILABLE:
             st.error("❌ Location library not installed. Add `streamlit-js-eval==0.1.7` to requirements.txt")
             st.stop()
         check_location_with_js_eval(company)
-        return  # st.stop() is inside the function
+        return
 
     if loc_required:
         st.success("✅ QR & Location verified!")
