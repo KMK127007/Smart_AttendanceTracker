@@ -11,8 +11,8 @@ import os
 # CONFIGURATION - UPDATE THESE WITH YOUR SUPABASE CREDENTIALS
 # =============================================================================
 
-SUPABASE_URL = "YOUR_SUPABASE_URL_HERE"  # e.g., https://xxxxx.supabase.co
-SUPABASE_KEY = "YOUR_SERVICE_ROLE_KEY_HERE"  # Use service_role key for bulk insert
+SUPABASE_URL = "https://fjtsnqxbvltfcaujqkpi.supabase.co"  # e.g., https://xxxxx.supabase.co
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZqdHNucXhidmx0ZmNhdWpxa3BpIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3Mjk2NjI3OSwiZXhwIjoyMDg4NTQyMjc5fQ.b7HxI3Twg43cVxHWSaZT6-NACGRSXufigsxDA_mHO1Q"  # Use service_role key for bulk insert
 
 EXCEL_FILE = "Students_List_For_Sreenidhi_attenance.xlsx"
 
