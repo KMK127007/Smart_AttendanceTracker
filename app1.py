@@ -302,14 +302,26 @@ def student_portal(company, device_id):
                     
                     if st.button("📤 Upload to Database", key="do_upload"):
                         with st.spinner(f"Uploading {len(df_upload)} students..."):
-                            data = df_upload.to_dict('records')
+                            # Replace NaN with None for JSON compliance
+                            df_clean = df_upload.where(pd.notnull(df_upload), None)
+                            data = df_clean.to_dict('records')
+                            
+                            # Clean mobile numbers and numeric fields
+                            for student in data:
+                                # Mobile as string
+                                if student.get('mobile') and isinstance(student['mobile'], float):
+                                    student['mobile'] = str(int(student['mobile']))
+                            
                             try:
                                 # Batch insert (500 at a time)
                                 batch_size = 500
+                                success_count = 0
                                 for i in range(0, len(data), batch_size):
                                     batch = data[i:i+batch_size]
                                     supabase.table('students').upsert(batch, on_conflict='rollnumber').execute()
-                                st.success(f"✅ {len(data)} students uploaded!")
+                                    success_count += len(batch)
+                                    st.info(f"Uploaded {success_count}/{len(data)} students...")
+                                st.success(f"✅ {len(data)} students uploaded successfully!")
                             except Exception as e:
                                 st.error(f"❌ Error: {str(e)}")
                 except Exception as e:
