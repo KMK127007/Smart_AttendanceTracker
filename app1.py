@@ -306,11 +306,17 @@ def student_portal(company, device_id):
                             df_clean = df_upload.where(pd.notnull(df_upload), None)
                             data = df_clean.to_dict('records')
                             
-                            # Clean mobile numbers and numeric fields
+                            # Clean mobile numbers
                             for student in data:
-                                # Mobile as string
-                                if student.get('mobile') and isinstance(student['mobile'], float):
-                                    student['mobile'] = str(int(student['mobile']))
+                                # Mobile as string (only if not None)
+                                if student.get('mobile') is not None:
+                                    try:
+                                        if isinstance(student['mobile'], float):
+                                            student['mobile'] = str(int(student['mobile']))
+                                        else:
+                                            student['mobile'] = str(student['mobile']).strip()
+                                    except (ValueError, TypeError):
+                                        student['mobile'] = None
                             
                             try:
                                 # Batch insert (500 at a time)
