@@ -276,6 +276,12 @@ def student_portal(company, device_id):
                     
                     df['rollnumber'] = df['rollnumber'].astype(str).str.strip().str.lower()
                     
+                    # Remove rows with empty/invalid roll numbers
+                    df = df[df['rollnumber'].notna()]
+                    df = df[df['rollnumber'] != '']
+                    df = df[df['rollnumber'] != 'nan']
+                    df = df[~df['rollnumber'].str.lower().isin(['none', 'null', 'na'])]
+                    
                     # Map columns to database schema
                     col_map = {
                         'S.No.': 'sno',
