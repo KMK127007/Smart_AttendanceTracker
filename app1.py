@@ -302,21 +302,36 @@ def student_portal(company, device_id):
                     
                     if st.button("📤 Upload to Database", key="do_upload"):
                         with st.spinner(f"Uploading {len(df_upload)} students..."):
-                            # Replace NaN with None for JSON compliance
-                            df_clean = df_upload.where(pd.notnull(df_upload), None)
+                            # Aggressively replace ALL NaN/inf values with None
+                            df_clean = df_upload.fillna('')  # First fill NaN with empty string
+                            df_clean = df_clean.replace(['nan', 'NaN', 'NAN', float('inf'), float('-inf')], None)
+                            
                             data = df_clean.to_dict('records')
                             
-                            # Clean mobile numbers
+                            # Clean each record
                             for student in data:
-                                # Mobile as string (only if not None)
-                                if student.get('mobile') is not None:
-                                    try:
-                                        if isinstance(student['mobile'], float):
-                                            student['mobile'] = str(int(student['mobile']))
+                                for key, value in list(student.items()):
+                                    # Convert empty strings to None
+                                    if value == '' or value == 'nan':
+                                        student[key] = None
+                                    # Handle mobile numbers specially
+                                    elif key == 'mobile' and value is not None:
+                                        try:
+                                            if isinstance(value, (int, float)):
+                                                student[key] = str(int(value))
+                                            else:
+                                                student[key] = str(value).strip()
+                                        except (ValueError, TypeError):
+                                            student[key] = None
+                                    # Handle numeric fields
+                                    elif key in ['current_term_score', 'xth_percentage', 'xiith_percentage']:
+                                        if value == '' or value is None:
+                                            student[key] = None
                                         else:
-                                            student['mobile'] = str(student['mobile']).strip()
-                                    except (ValueError, TypeError):
-                                        student['mobile'] = None
+                                            try:
+                                                student[key] = float(value)
+                                            except (ValueError, TypeError):
+                                                student[key] = None
                             
                             try:
                                 # Batch insert (500 at a time)
